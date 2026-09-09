@@ -137,22 +137,39 @@ If you see an answer, do not proceed — your firewall or config is wrong.
 Open resolvers are abused for DDoS amplification and will get you nullrouted
 by your provider.
 
-### 4. Rate limiting (highly recommended for public exposure)
+### 4. Rate limiting
 
-The built-in DNS server doesn't rate-limit. In front of privatedns, use
-nftables to rate-limit incoming DNS to your box:
+**privatedns has built-in per-source-IP token-bucket rate limiting.** No
+external firewall rules are required for basic DNS query rate limiting.
+Configuration via environment variables:
+
+| Variable                                | Default              | Meaning                                      |
+|-----------------------------------------|----------------------|----------------------------------------------|
+| `PRIVATEDNS_DNS_RATE_LIMIT_PER_SEC`     | `20`                 | Sustained query rate per source IP           |
+| `PRIVATEDNS_DNS_RATE_LIMIT_BURST`       | `40`                 | Burst capacity per source IP                 |
+| `PRIVATEDNS_DNS_RATE_LIMIT_EXEMPT_CIDR` | `127.0.0.0/8,::1/128`| Sources that bypass the limiter entirely     |
+
+Over-limit queries are silently dropped (no response) — the correct
+behavior for an authoritative server exposed to the Internet, since
+error responses would themselves be amplification vectors. The drop
+counter is available in debug logs.
+
+Tune `PRIVATEDNS_DNS_RATE_LIMIT_PER_SEC` to your expected legitimate
+traffic. For heavy production loads, set higher and add nftables as a
+defence-in-depth layer:
 
 ```
 table inet dns {
   set client_rate { type ipv4_addr; flags dynamic, timeout; timeout 1m; size 65535 }
   chain input {
     type filter hook input priority filter; policy accept;
-    udp dport 53 update @client_rate { ip saddr limit rate over 20/second } drop
+    udp dport 53 update @client_rate { ip saddr limit rate over 100/second } drop
   }
 }
 ```
 
-Tune `20/second` to your expected legitimate traffic.
+Set the nftables threshold *above* the in-app limit so the in-app limiter
+handles per-IP fairness and nftables catches broader abuse patterns.
 
 ### 5. Add a secondary (recommended)
 

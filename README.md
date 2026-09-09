@@ -123,6 +123,9 @@ Everything is environment variables. Defaults are safe.
 | `PRIVATEDNS_ADMIN_PASSWORD`       | *generated*          | Bootstrap admin password (printed once)                   |
 | `PRIVATEDNS_ALLOW_QUERY_FROM`     | *all*                | CIDRs allowed to query (empty = anyone)                   |
 | `PRIVATEDNS_ALLOW_RECURSION_FROM` | `127.0.0.0/8,::1/128`| CIDRs allowed to recurse (empty = loopback only)          |
+| `PRIVATEDNS_DNS_RATE_LIMIT_PER_SEC` | `20`               | Per-source-IP query rate (token bucket). `0` disables.    |
+| `PRIVATEDNS_DNS_RATE_LIMIT_BURST` | `40`                 | Per-source-IP burst capacity                              |
+| `PRIVATEDNS_DNS_RATE_LIMIT_EXEMPT_CIDR` | `127.0.0.0/8,::1/128` | Sources that bypass the rate limiter               |
 | `PRIVATEDNS_LOG_LEVEL`            | `info`               | debug / info / warn / error                               |
 
 **Security note:** never set `PRIVATEDNS_ALLOW_RECURSION_FROM` to

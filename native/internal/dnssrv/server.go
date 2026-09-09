@@ -26,6 +26,7 @@ type Server struct {
 	allowQuery   []*net.IPNet // empty = allow all
 	allowRecurse []*net.IPNet // empty = deny all
 	upstream     *forwarder
+	limiter      *RateLimiter
 }
 
 func New(st *store.Store, cfg *config.Config) *Server {
@@ -35,6 +36,11 @@ func New(st *store.Store, cfg *config.Config) *Server {
 		allowQuery:   parseCIDRs(cfg.AllowQueryFrom),
 		allowRecurse: parseCIDRs(cfg.AllowRecursionFrom),
 		upstream:     newForwarder(cfg.Upstreams),
+		limiter: NewRateLimiter(RateLimiterConfig{
+			PerSecond:   cfg.DNSRateLimitPerSec,
+			Burst:       cfg.DNSRateLimitBurst,
+			ExemptCIDRs: parseCIDRs(cfg.DNSRateLimitExempt),
+		}),
 	}
 	return s
 }
@@ -90,6 +96,14 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeRefused)
 		_ = w.WriteMsg(m)
+		return
+	}
+
+	// Rate limiting: silently drop when over budget. No DNS response,
+	// no error log — over-limit responses would themselves be amplification
+	// vectors. Debug log lets operators see it if they need to.
+	if !s.limiter.Allow(remoteIP) {
+		slog.Debug("dns.ratelimited", "ip", remoteIP)
 		return
 	}
 

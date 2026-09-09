@@ -161,6 +161,9 @@ Configuration via environment (all optional):
   PRIVATEDNS_ADMIN_PASSWORD          Bootstrap admin password (default: randomly generated, printed once)
   PRIVATEDNS_ALLOW_QUERY_FROM        CIDRs allowed to send DNS queries (default: all)
   PRIVATEDNS_ALLOW_RECURSION_FROM    CIDRs allowed to recurse (default: loopback only)
+  PRIVATEDNS_DNS_RATE_LIMIT_PER_SEC  Per-source-IP QPS (default: 20; 0 disables)
+  PRIVATEDNS_DNS_RATE_LIMIT_BURST    Per-source-IP burst (default: 40)
+  PRIVATEDNS_DNS_RATE_LIMIT_EXEMPT_CIDR   CIDRs that bypass rate limit (default: loopback)
   PRIVATEDNS_LOG_LEVEL               debug|info|warn|error (default: info)
 `)
 }
