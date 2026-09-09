@@ -1,0 +1,258 @@
+name: privatedns
+
+x-restart: &restart
+  restart: unless-stopped
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+networks:
+  # Everything runs on an internal user-defined bridge. Only the ports we
+  # explicitly publish reach the host.
+  privatedns:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  postgres_data:
+  pdns_data:
+  recursor_data:
+  ca_data:
+  caddy_data:
+  caddy_config:
+  prometheus_data:
+  grafana_data:
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — shared database. Two schemas:
+  #   - pdns:   PowerDNS Authoritative's tables
+  #   - mgmt:   Users, API keys, audit log, zone metadata
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    <<: [*restart, *logging]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Force scram-sha-256 password auth
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/migrations:/docker-entrypoint-initdb.d:ro
+    networks:
+      privatedns:
+        aliases: [postgres]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # ---------------------------------------------------------------------------
+  # PowerDNS Authoritative — serves the private zones.
+  # Its HTTP API is only reachable from inside the compose network. The
+  # management API talks to it at http://pdns-auth:8081.
+  # ---------------------------------------------------------------------------
+  pdns-auth:
+    build: ./dns/authoritative
+    <<: [*restart, *logging]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PDNS_API_KEY: ${PDNS_API_KEY}
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB}
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pdns_data:/var/lib/powerdns
+    networks:
+      privatedns:
+        aliases: [pdns-auth, ns1.${PRIVATE_TLD:-myworld}]
+    # Auth server does NOT publish port 53 to the host. Only the recursor
+    # exposes port 53 externally. Auth server publishes on ${DNS_AUTH_PORT}
+    # for secondary transfers if needed.
+    ports:
+      - "${DNS_AUTH_PORT:-5353}:53/udp"
+      - "${DNS_AUTH_PORT:-5353}:53/tcp"
+    healthcheck:
+      test: ["CMD-SHELL", "pdns_control ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Unbound — recursive resolver. This is what clients point their DNS at.
+  # It forwards the private TLD to pdns-auth and resolves everything else via
+  # DNS-over-TLS upstreams.
+  # ---------------------------------------------------------------------------
+  recursor:
+    build: ./dns/recursor
+    <<: [*restart, *logging]
+    depends_on:
+      pdns-auth:
+        condition: service_healthy
+    environment:
+      PRIVATE_TLD: ${PRIVATE_TLD}
+      RECURSOR_ACL: ${RECURSOR_ACL}
+      RECURSOR_UPSTREAMS: ${RECURSOR_UPSTREAMS}
+    volumes:
+      - recursor_data:/var/lib/unbound
+    networks:
+      privatedns:
+        aliases: [recursor]
+    ports:
+      - "${DNS_RECURSOR_PORT:-53}:53/udp"
+      - "${DNS_RECURSOR_PORT:-53}:53/tcp"
+    healthcheck:
+      test: ["CMD", "drill", "@127.0.0.1", "id.server", "CH", "TXT"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # step-ca — private certificate authority. Provides an ACME endpoint that
+  # Caddy uses to obtain internal certificates for *.myworld services.
+  # ---------------------------------------------------------------------------
+  ca:
+    build: ./ca
+    <<: [*restart, *logging]
+    environment:
+      CA_PASSWORD: ${CA_PASSWORD}
+      CA_DNS_NAME: ${CA_DNS_NAME}
+      PRIVATE_TLD: ${PRIVATE_TLD}
+    volumes:
+      - ca_data:/home/step
+    networks:
+      privatedns:
+        aliases: [ca, ${CA_DNS_NAME}]
+    ports:
+      - "${CA_PORT:-9000}:9000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsk", "https://localhost:9000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Management API — Go binary. Talks to Postgres and PowerDNS HTTP API.
+  # ---------------------------------------------------------------------------
+  api:
+    build: ./api
+    <<: [*restart, *logging]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pdns-auth:
+        condition: service_healthy
+    environment:
+      API_LISTEN: ":8080"
+      API_LOG_LEVEL: ${API_LOG_LEVEL}
+      API_JWT_SECRET: ${API_JWT_SECRET}
+      API_RATE_LIMIT: ${API_RATE_LIMIT}
+      PDNS_API_URL: http://pdns-auth:8081/api/v1
+      PDNS_API_KEY: ${PDNS_API_KEY}
+      PDNS_DEFAULT_NS: ns1.${PRIVATE_TLD}.
+      PDNS_PUBLIC_IP: ${DNS_PUBLIC_IP}
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB}
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      PRIVATE_TLD: ${PRIVATE_TLD}
+      BOOTSTRAP_ZONES: ${BOOTSTRAP_ZONES}
+    networks:
+      privatedns:
+        aliases: [api]
+    # Bound to loopback only. Reverse-proxy handles external access on 443.
+    # Publishing here so host-side scripts (seed, healthcheck, integration
+    # tests) can call the API without going through TLS.
+    ports:
+      - "127.0.0.1:${API_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Dashboard — static SPA served by Caddy directly (no separate container).
+  # See reverse-proxy/Caddyfile.
+  # ---------------------------------------------------------------------------
+
+  # ---------------------------------------------------------------------------
+  # Caddy — reverse proxy. Obtains internal certs from step-ca via ACME,
+  # terminates TLS for dashboard/API, and routes to backend services.
+  # ---------------------------------------------------------------------------
+  reverse-proxy:
+    build: ./reverse-proxy
+    <<: [*restart, *logging]
+    depends_on:
+      ca:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    environment:
+      CA_DNS_NAME: ${CA_DNS_NAME}
+      DASHBOARD_DOMAIN: ${DASHBOARD_DOMAIN}
+      API_DOMAIN: ${API_DOMAIN}
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./dashboard:/srv/dashboard:ro
+    networks:
+      privatedns:
+        aliases: [reverse-proxy, ${DASHBOARD_DOMAIN}, ${API_DOMAIN}]
+    ports:
+      - "80:80"
+      - "443:443"
+
+  # ---------------------------------------------------------------------------
+  # Prometheus + Grafana — monitoring. Prometheus scrapes:
+  #   - pdns-auth (built-in /metrics endpoint)
+  #   - recursor  (unbound_exporter sidecar not included; uses unbound-control)
+  #   - api       (Go /metrics)
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    <<: [*restart, *logging]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      privatedns:
+        aliases: [prometheus]
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    <<: [*restart, *logging]
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      privatedns:
+        aliases: [grafana]
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"

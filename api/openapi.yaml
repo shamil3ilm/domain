@@ -1,0 +1,261 @@
+openapi: 3.0.3
+info:
+  title: privatedns Management API
+  version: "1.0.0"
+  description: |
+    REST API for managing zones, records, users, API keys, and audit logs
+    on the privatedns platform.
+
+servers:
+  - url: https://api.myworld/api/v1
+    description: Production (via reverse-proxy)
+  - url: http://localhost:8080/api/v1
+    description: Local (no TLS)
+
+security:
+  - bearerAuth: []
+
+paths:
+  /auth/login:
+    post:
+      summary: Log in and receive a JWT
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:    { type: string, format: email }
+                password: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:       { type: string }
+                  expires_at:  { type: string, format: date-time }
+                  user:        { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /auth/me:
+    get:
+      summary: Current principal
+      responses:
+        "200": { description: OK }
+
+  /auth/logout:
+    post:
+      summary: Revoke current JWT
+      responses:
+        "200": { description: OK }
+
+  /zones:
+    get:
+      summary: List zones
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Zone" }
+    post:
+      summary: Create a zone
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:        { type: string, example: "example.myworld" }
+                kind:        { type: string, enum: [Native, Master], default: Native }
+                description: { type: string }
+                tags:        { type: array, items: { type: string } }
+                nameservers: { type: array, items: { type: string } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Zone" }
+
+  /zones/{zone}:
+    parameters:
+      - in: path
+        name: zone
+        required: true
+        schema: { type: string }
+    get:
+      summary: Get a zone
+      responses:
+        "200": { description: OK }
+    delete:
+      summary: Delete a zone
+      responses:
+        "204": { description: No Content }
+
+  /zones/{zone}/records:
+    parameters:
+      - in: path
+        name: zone
+        required: true
+        schema: { type: string }
+    get:
+      summary: List record sets in a zone
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/RecordSet" }
+    put:
+      summary: Upsert a record set (REPLACE semantics)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, type]
+              properties:
+                name:    { type: string, example: "www" }
+                type:    { type: string, example: "A" }
+                ttl:     { type: integer, default: 3600 }
+                content: { type: array, items: { type: string } }
+                value:   { type: string, description: "shorthand for content=[value]" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecordSet" }
+    delete:
+      summary: Delete a record set (name + type)
+      parameters:
+        - in: query
+          name: name
+          schema: { type: string }
+        - in: query
+          name: type
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+
+  /keys:
+    get:
+      summary: List own API keys
+      responses:
+        "200": { description: OK }
+    post:
+      summary: Create a new API key. Token is returned once.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:   { type: string }
+                scopes: { type: array, items: { type: string } }
+      responses:
+        "201": { description: Created }
+
+  /keys/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+    delete:
+      summary: Revoke an API key
+      responses:
+        "204": { description: No Content }
+
+  /users:
+    get:
+      summary: List users (admin only)
+      responses: { "200": { description: OK } }
+    post:
+      summary: Create a user (admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, role]
+              properties:
+                email:    { type: string, format: email }
+                password: { type: string, minLength: 12 }
+                role:     { type: string, enum: [admin, operator, viewer] }
+      responses: { "201": { description: Created } }
+
+  /audit:
+    get:
+      summary: List audit events
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+      responses: { "200": { description: OK } }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT-or-APIKey
+  responses:
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string }
+  schemas:
+    User:
+      type: object
+      properties:
+        id:       { type: string, format: uuid }
+        email:    { type: string, format: email }
+        role:     { type: string }
+        disabled: { type: boolean }
+    Zone:
+      type: object
+      properties:
+        name:        { type: string }
+        kind:        { type: string }
+        is_private:  { type: boolean }
+        description: { type: string }
+        serial:      { type: integer }
+        tags:        { type: array, items: { type: string } }
+    RecordSet:
+      type: object
+      properties:
+        name:    { type: string }
+        type:    { type: string }
+        ttl:     { type: integer }
+        records: { type: array, items: { $ref: "#/components/schemas/Record" } }
+    Record:
+      type: object
+      properties:
+        id:       { type: string }
+        name:     { type: string }
+        type:     { type: string }
+        ttl:      { type: integer }
+        content:  { type: string }
+        disabled: { type: boolean }

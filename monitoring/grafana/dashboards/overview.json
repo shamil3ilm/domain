@@ -1,0 +1,43 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 0,
+  "id": null,
+  "title": "privatedns / Overview",
+  "tags": ["privatedns"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "PDNS udp queries / sec",
+      "targets": [{ "expr": "rate(pdns_auth_udp_queries[1m])", "refId": "A" }],
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "PDNS tcp queries / sec",
+      "targets": [{ "expr": "rate(pdns_auth_tcp_queries[1m])", "refId": "A" }],
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "API 5xx / sec",
+      "targets": [{ "expr": "sum(rate(promhttp_metric_handler_requests_total{code=~\"5..\"}[5m]))", "refId": "A" }],
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "PDNS query latency (p95)",
+      "targets": [{ "expr": "histogram_quantile(0.95, sum by (le) (rate(pdns_auth_query_latency_bucket[5m])))", "refId": "A" }],
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 }
+    }
+  ]
+}

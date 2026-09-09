@@ -1,0 +1,91 @@
+# =============================================================================
+# Unbound — recursive resolver for authorized clients.
+#
+#   * Queries for ${PRIVATE_TLD}. and its subzones are forwarded to pdns-auth
+#     (authoritative). This is how clients on the VPN/LAN resolve internal
+#     names WITHOUT hijacking the public Internet.
+#
+#   * All other queries go upstream over DNS-over-TLS.
+#
+#   * Recursion is refused for anyone not on ${RECURSOR_ACL}.
+# =============================================================================
+
+server:
+    verbosity: 1
+    interface: 0.0.0.0
+    interface: ::0
+    port: 53
+
+    do-ip4: yes
+    do-ip6: yes
+    do-udp: yes
+    do-tcp: yes
+
+    # ---- ACL ---------------------------------------------------------------
+    # Default deny; explicit allow-list from env.
+    access-control: 0.0.0.0/0 refuse
+    access-control: ::/0     refuse
+${RECURSOR_ACL_LINES}
+
+    # ---- Hardening ---------------------------------------------------------
+    hide-identity: yes
+    hide-version: yes
+    harden-glue: yes
+    harden-dnssec-stripped: yes
+    harden-below-nxdomain: yes
+    harden-referral-path: yes
+    harden-algo-downgrade: yes
+    use-caps-for-id: yes
+    qname-minimisation: yes
+    aggressive-nsec: yes
+    prefetch: yes
+    prefetch-key: yes
+
+    # DNSSEC validation for the public Internet. Private zones are handled
+    # differently — the domain-insecure directive tells Unbound not to try
+    # to validate DNSSEC on our private TLD (unless we've set up a proper
+    # trust anchor for it; see docs/DNSSEC.md).
+    auto-trust-anchor-file: "/var/lib/unbound/root.key"
+    domain-insecure: "${PRIVATE_TLD}"
+
+    # ---- Cache / performance -----------------------------------------------
+    cache-min-ttl: 60
+    cache-max-ttl: 86400
+    msg-cache-size: 64m
+    rrset-cache-size: 128m
+    num-threads: 2
+
+    # ---- Local data --------------------------------------------------------
+    # Report identity for the healthcheck.
+    local-zone: "recursor.local." static
+    local-data: "recursor.local. IN TXT \"privatedns-recursor\""
+
+    # ---- Logging -----------------------------------------------------------
+    log-queries: no
+    log-replies: no
+    log-servfail: yes
+    log-local-actions: no
+    log-tag-queryreply: no
+
+    # ---- Remote control (for metrics / reload) -----------------------------
+remote-control:
+    control-enable: yes
+    control-interface: 127.0.0.1
+    control-use-cert: no
+
+# ---- Forward the private TLD to the authoritative server -------------------
+# This is what makes ".${PRIVATE_TLD}" resolve internally without any public
+# delegation. We forward all subzones (forward-first: no means: never fall
+# back to a real recursive resolution for these names).
+forward-zone:
+    name: "${PRIVATE_TLD}."
+    forward-addr: 172.28.0.0@53          # replaced with pdns-auth IP at runtime
+    forward-first: no
+    forward-tls-upstream: no
+
+# ---- Forward everything else via DNS-over-TLS -------------------------------
+forward-zone:
+    name: "."
+${RECURSOR_UPSTREAM_LINES}
+    forward-tls-upstream: yes
+    forward-first: no
