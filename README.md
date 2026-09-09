@@ -140,6 +140,7 @@ subnet — nothing more.
 - [`docs/deployment-linux.md`](docs/deployment-linux.md) — systemd on Debian/Ubuntu/RHEL
 - [`docs/deployment-macos.md`](docs/deployment-macos.md) — launchd daemon
 - [`docs/deployment-vps.md`](docs/deployment-vps.md) — Oracle Free Tier / Hetzner / anywhere
+- [`docs/integration-mail.md`](docs/integration-mail.md) — running with `mail-service` for automatic SPF/DKIM/DMARC/MX publishing
 - [`docs/security.md`](docs/security.md) — threat model, ACLs, hardening
 - [`docs/client-setup.md`](docs/client-setup.md) — pointing clients at your DNS
 - [`docs/operations.md`](docs/operations.md) — day-2 tasks, adding zones/records via API
