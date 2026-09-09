@@ -152,6 +152,67 @@ paths:
       responses:
         "204": { description: No Content }
 
+  "/zones/{zone}/records:batch":
+    parameters:
+      - in: path
+        name: zone
+        required: true
+        schema: { type: string }
+    put:
+      summary: Atomically upsert multiple record sets (REPLACE per name+type)
+      description: |
+        Applies REPLACE semantics to every (name, type) pair in the request
+        in a single database transaction. All records persist or none do —
+        a malformed or DB-rejected record aborts the entire batch.
+
+        Same authentication as the single-record endpoint: `Authorization:
+        Bearer <jwt-or-api-key>`. Requires the operator or admin role.
+
+        Duplicate (name, type) pairs within one batch are rejected with a
+        400 — combine content values inside a single record instead.
+
+        The batch is capped at 500 records per request to bound transaction
+        time.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [records]
+              properties:
+                records:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items:
+                    type: object
+                    required: [name, type]
+                    properties:
+                      name:    { type: string, example: "www" }
+                      type:    { type: string, example: "A" }
+                      ttl:     { type: integer, default: 3600 }
+                      content: { type: array, items: { type: string } }
+                      value:   { type: string, description: "shorthand for content=[value]" }
+            example:
+              records:
+                - { name: "example.com.", type: "MX",  ttl: 3600, value: "10 mail.example.com." }
+                - { name: "example.com.", type: "TXT", value: "v=spf1 mx -all" }
+                - { name: "mail.example.com.", type: "TXT", value: "v=DKIM1; k=rsa; p=..." }
+      responses:
+        "200":
+          description: All record sets persisted
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/RecordSet" }
+        "400":
+          description: Invalid record, duplicate (name,type), or batch too large. Nothing was persisted.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: Caller lacks operator or admin role }
+        "404": { description: Zone not found }
+
   /keys:
     get:
       summary: List own API keys

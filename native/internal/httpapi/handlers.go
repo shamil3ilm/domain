@@ -250,6 +250,108 @@ func (a *apiServer) upsertRecord(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ---- Batch upsert -------------------------------------------------------
+
+type batchUpsertRequest struct {
+	Records []upsertRecordRequest `json:"records"`
+}
+
+// batchUpsertRecords replaces every (name,type) pair in one transaction.
+// All-or-nothing: any invalid record aborts the entire batch. Uses the
+// same auth/RBAC as the single-record endpoint (mounted in the same
+// operator/admin group in server.go).
+func (a *apiServer) batchUpsertRecords(w http.ResponseWriter, r *http.Request) {
+	zone := chi.URLParam(r, "zone")
+	if _, err := a.store.GetZone(r.Context(), zone); err != nil {
+		writeError(w, http.StatusNotFound, "zone not found")
+		return
+	}
+
+	var req batchUpsertRequest
+	if err := decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if len(req.Records) == 0 {
+		writeError(w, http.StatusBadRequest, "records required")
+		return
+	}
+	// Cap the batch size to keep transaction time bounded.
+	const maxBatch = 500
+	if len(req.Records) > maxBatch {
+		writeError(w, http.StatusBadRequest, "batch too large (max 500)")
+		return
+	}
+
+	// Validate every record first. If any fails, nothing runs.
+	sets := make([]store.RecordSetInput, 0, len(req.Records))
+	seen := make(map[string]int, len(req.Records))
+	for i, rec := range req.Records {
+		if rec.Name == "" || rec.Type == "" {
+			writeError(w, http.StatusBadRequest, "records[%d]: name and type required")
+			return
+		}
+		if err := validateRRType(rec.Type); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if rec.Value != "" && len(rec.Content) == 0 {
+			rec.Content = []string{rec.Value}
+		}
+		if len(rec.Content) == 0 {
+			writeError(w, http.StatusBadRequest, "records: content required")
+			return
+		}
+		if rec.TTL <= 0 {
+			rec.TTL = 3600
+		}
+		typ := strings.ToUpper(rec.Type)
+		fqdn := qualify(rec.Name, zone)
+		key := fqdn + "|" + typ
+		if prev, dup := seen[key]; dup {
+			writeError(w, http.StatusBadRequest,
+				"duplicate (name,type) in batch — combine content instead: index "+
+					strings.TrimSpace(itoa(prev))+" and "+strings.TrimSpace(itoa(i)))
+			return
+		}
+		seen[key] = i
+		sets = append(sets, store.RecordSetInput{
+			Name:     fqdn,
+			Type:     typ,
+			TTL:      rec.TTL,
+			Contents: rec.Content,
+		})
+	}
+
+	if err := a.store.UpsertRecordSetsBatch(r.Context(), zone, sets); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	p, _ := principalFrom(r.Context())
+	a.store.WriteAudit(r.Context(), store.AuditEvent{
+		ActorUser: p.UserID, ActorIP: clientIPFrom(r.Context()),
+		Action:     "record.batch_upsert",
+		TargetType: "zone", TargetID: zone,
+		Outcome: "success",
+		Detail:  itoa(len(sets)) + " record sets",
+	})
+
+	// Response mirrors the single-upsert style: return the record sets that
+	// were persisted, without materializing every content row.
+	out := make([]RecordSet, 0, len(sets))
+	for _, rs := range sets {
+		recs := make([]store.Record, 0, len(rs.Contents))
+		for _, c := range rs.Contents {
+			recs = append(recs, store.Record{
+				Zone: zone, Name: rs.Name, Type: rs.Type, TTL: rs.TTL, Content: c,
+			})
+		}
+		out = append(out, RecordSet{Name: rs.Name, Type: rs.Type, TTL: rs.TTL, Records: recs})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 func (a *apiServer) deleteRecord(w http.ResponseWriter, r *http.Request) {
 	zone := chi.URLParam(r, "zone")
 	name := r.URL.Query().Get("name")

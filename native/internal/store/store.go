@@ -419,6 +419,53 @@ func (s *Store) UpsertRecordSet(ctx context.Context, zone, name, typ string, ttl
 	return tx.Commit()
 }
 
+// RecordSetInput is one normalized (name,type,ttl,contents) upsert. The
+// batch upsert takes a slice of these; each replaces its (zone,name,type)
+// tuple atomically alongside the others.
+type RecordSetInput struct {
+	Name     string
+	Type     string
+	TTL      int
+	Contents []string
+}
+
+// UpsertRecordSetsBatch performs REPLACE semantics for every (name,type)
+// pair in one SQL transaction. Any error rolls back the entire batch —
+// callers see either "all persisted" or "none persisted".
+func (s *Store) UpsertRecordSetsBatch(ctx context.Context, zone string, sets []RecordSetInput) error {
+	if len(sets) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // rollback after commit is a no-op
+
+	zoneLC := strings.ToLower(zone)
+	for _, rs := range sets {
+		nameLC := strings.ToLower(rs.Name)
+		typUC := strings.ToUpper(rs.Type)
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM records WHERE zone = ? AND name = ? AND type = ?`,
+			zoneLC, nameLC, typUC); err != nil {
+			return fmt.Errorf("batch delete %s %s: %w", rs.Name, rs.Type, err)
+		}
+		for _, c := range rs.Contents {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO records (zone, name, type, ttl, content) VALUES (?,?,?,?,?)`,
+				zoneLC, nameLC, typUC, rs.TTL, c); err != nil {
+				return fmt.Errorf("batch insert %s %s: %w", rs.Name, rs.Type, err)
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE zones SET serial = serial + 1 WHERE name = ?`, zoneLC); err != nil {
+		return fmt.Errorf("batch bump serial: %w", err)
+	}
+	return tx.Commit()
+}
+
 func (s *Store) DeleteRecordSet(ctx context.Context, zone, name, typ string) (bool, error) {
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM records WHERE zone = ? AND name = ? AND type = ?`,
