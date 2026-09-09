@@ -24,12 +24,12 @@ const (
 )
 
 type User struct {
-	ID           string    `json:"id"`
-	Email        string    `json:"email"`
-	PasswordHash string    `json:"-"`
-	Role         Role      `json:"role"`
-	Disabled     bool      `json:"disabled"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID           string     `json:"id"`
+	Email        string     `json:"email"`
+	PasswordHash string     `json:"-"`
+	Role         Role       `json:"role"`
+	Disabled     bool       `json:"disabled"`
+	CreatedAt    time.Time  `json:"created_at"`
 	LastLoginAt  *time.Time `json:"last_login_at,omitempty"`
 }
 
@@ -58,7 +58,7 @@ type Zone struct {
 type Record struct {
 	ID       int64  `json:"id"`
 	Zone     string `json:"zone"`
-	Name     string `json:"name"`     // fully-qualified, no trailing dot
+	Name     string `json:"name"` // fully-qualified, no trailing dot
 	Type     string `json:"type"`
 	TTL      int    `json:"ttl"`
 	Content  string `json:"content"`
@@ -66,16 +66,16 @@ type Record struct {
 }
 
 type AuditEvent struct {
-	ID         int64                  `json:"id"`
-	Timestamp  time.Time              `json:"ts"`
-	ActorUser  string                 `json:"actor_user,omitempty"`
-	ActorKey   string                 `json:"actor_key,omitempty"`
-	ActorIP    string                 `json:"actor_ip,omitempty"`
-	Action     string                 `json:"action"`
-	TargetType string                 `json:"target_type,omitempty"`
-	TargetID   string                 `json:"target_id,omitempty"`
-	Outcome    string                 `json:"outcome"`
-	Detail     string                 `json:"detail,omitempty"`
+	ID         int64     `json:"id"`
+	Timestamp  time.Time `json:"ts"`
+	ActorUser  string    `json:"actor_user,omitempty"`
+	ActorKey   string    `json:"actor_key,omitempty"`
+	ActorIP    string    `json:"actor_ip,omitempty"`
+	Action     string    `json:"action"`
+	TargetType string    `json:"target_type,omitempty"`
+	TargetID   string    `json:"target_id,omitempty"`
+	Outcome    string    `json:"outcome"`
+	Detail     string    `json:"detail,omitempty"`
 }
 
 // ---- Store ---------------------------------------------------------------
@@ -543,7 +543,12 @@ func (s *Store) IsRevoked(ctx context.Context, jti string) bool {
 
 // ==== helpers ============================================================
 
-func boolInt(b bool) int { if b { return 1 }; return 0 }
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
 
 func nullIfEmpty(s string) any {
 	if s == "" {

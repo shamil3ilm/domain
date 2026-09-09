@@ -1,0 +1,55 @@
+# Test on every push/PR. On tag `v*`, additionally build the release matrix
+# via native/build-release.sh and attach the artifacts to the GitHub release.
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: write   # required by softprops/action-gh-release to publish
+
+jobs:
+  test:
+    name: test (native)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+          cache-dependency-path: native/go.sum
+      - name: go vet
+        working-directory: native
+        run: go vet ./...
+      - name: go test -race
+        working-directory: native
+        run: go test -race -covermode=atomic ./...
+
+  release:
+    name: release
+    needs: test
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+          cache-dependency-path: native/go.sum
+      - name: build release artifacts
+        working-directory: native
+        # VERSION overrides main.go's baked-in value; keeps archive names in sync with the tag.
+        run: VERSION="${GITHUB_REF_NAME#v}" bash ./build-release.sh
+      - name: publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            native/dist/*.tar.gz
+            native/dist/*.zip
+            native/dist/SHA256SUMS
+          generate_release_notes: true

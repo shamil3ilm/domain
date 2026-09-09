@@ -11,11 +11,11 @@ func TestInACL(t *testing.T) {
 	acl := []*net.IPNet{lan, loop}
 
 	cases := []struct {
-		name           string
-		ip             net.IP
-		acl            []*net.IPNet
-		emptyAllows    bool
-		want           bool
+		name        string
+		ip          net.IP
+		acl         []*net.IPNet
+		emptyAllows bool
+		want        bool
 	}{
 		{"empty ACL, empty=allow, arbitrary IP", net.ParseIP("8.8.8.8"), nil, true, true},
 		{"empty ACL, empty=deny, arbitrary IP", net.ParseIP("8.8.8.8"), nil, false, false},
