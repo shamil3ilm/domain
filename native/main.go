@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,51 +27,145 @@ import (
 	"github.com/privatedns/native/internal/dnssrv"
 	"github.com/privatedns/native/internal/httpapi"
 	"github.com/privatedns/native/internal/store"
+	"github.com/privatedns/native/internal/svcmgr"
 )
 
-const version = "0.1.0"
+const (
+	version     = "0.2.0"
+	serviceName = "privatedns"
+	displayName = "privatedns"
+	description = "Private DNS + management API"
+)
 
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "version", "--version", "-v":
-			fmt.Println("privatedns", version)
-			return
-		case "help", "--help", "-h":
-			usage()
-			return
-		}
+	// If the OS started us as a Windows service, dispatch straight to svc.Run
+	// so lifecycle messages reach the SCM. This does NOT match the case where
+	// the user typed `privatedns service run` — that goes through the CLI
+	// dispatcher below.
+	if isSvc, _ := svcmgr.IsWindowsService(); isSvc {
+		_ = svcmgr.Handle(svcmgr.ActionRun, svcmgr.Options{ServiceName: serviceName}, run)
+		return
 	}
 
-	if err := run(); err != nil {
+	// Command dispatch.
+	args := os.Args[1:]
+	if len(args) == 0 {
+		mustRun(run)
+		return
+	}
+
+	switch args[0] {
+	case "version", "--version", "-v":
+		fmt.Println("privatedns", version)
+	case "help", "--help", "-h":
+		usage()
+	case "service":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: privatedns service <install|uninstall|start|stop|status|run> [--env-file <path>]")
+			os.Exit(2)
+		}
+		handleService(args[1], args[2:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
+		usage()
+		os.Exit(2)
+	}
+}
+
+func mustRun(fn func(context.Context) error) {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	if err := fn(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "fatal:", err)
 		os.Exit(1)
 	}
 }
 
-func usage() {
-	fmt.Println(`privatedns ` + version + `
-Usage: privatedns [command]
+func handleService(action string, rest []string) {
+	// Optional --env-file: load KEY=value pairs before doing anything else.
+	// This is how Windows Service persists its "install-time" configuration.
+	envFile := ""
+	for i := 0; i < len(rest); i++ {
+		if rest[i] == "--env-file" && i+1 < len(rest) {
+			envFile = rest[i+1]
+			i++
+		}
+	}
+	if envFile != "" {
+		if err := svcmgr.LoadEnvFile(envFile); err != nil {
+			fmt.Fprintln(os.Stderr, "load env file:", err)
+			os.Exit(1)
+		}
+	}
 
-Commands:
-  (default)   Run the server.
-  version     Print version.
-  help        This message.
+	opts := svcmgr.Options{
+		ServiceName: serviceName,
+		DisplayName: displayName,
+		Description: description,
+	}
+
+	act := svcmgr.Action(action)
+	switch act {
+	case svcmgr.ActionInstall:
+		// Capture every PRIVATEDNS_* env var currently set — that's what we
+		// want to bake into the service so `install` under a shell that had
+		// the desired env exported does the right thing.
+		opts.Env = captureEnv("PRIVATEDNS_")
+	case svcmgr.ActionRun:
+		// Under `service run` invoked by the SCM (or manually for testing),
+		// we want to actually run the server. Don't shell out.
+		mustRun(run)
+		return
+	}
+
+	if err := svcmgr.Handle(act, opts, run); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func captureEnv(prefix string) map[string]string {
+	out := map[string]string{}
+	for _, kv := range os.Environ() {
+		i := strings.IndexByte(kv, '=')
+		if i <= 0 {
+			continue
+		}
+		k := kv[:i]
+		if strings.HasPrefix(k, prefix) {
+			out[k] = kv[i+1:]
+		}
+	}
+	return out
+}
+
+func usage() {
+	fmt.Print(`privatedns ` + version + `
+Usage:
+  privatedns                        Run the server in the foreground.
+  privatedns version                Print version.
+  privatedns help                   This message.
+  privatedns service install        Install as a Windows Service (elevated).
+  privatedns service uninstall      Remove the Windows Service.
+  privatedns service start          Start the Windows Service.
+  privatedns service stop           Stop the Windows Service.
+  privatedns service status         Show current service state.
 
 Configuration via environment (all optional):
-  PRIVATEDNS_DATA_DIR         Where to keep the SQLite DB + secrets (default: ./data)
-  PRIVATEDNS_PRIVATE_TLD      Private namespace (default: myworld)
-  PRIVATEDNS_DNS_ADDR         DNS listen address (default: :53)
-  PRIVATEDNS_API_ADDR         HTTP API listen address (default: :8080)
-  PRIVATEDNS_UPSTREAMS        Upstream resolvers (default: 1.1.1.1:53,9.9.9.9:53)
-  PRIVATEDNS_ADMIN_EMAIL      Bootstrap admin email (default: admin@local)
-  PRIVATEDNS_ADMIN_PASSWORD   Bootstrap admin password (default: randomly generated, printed once)
-  PRIVATEDNS_ALLOW_FROM       CIDRs allowed to send DNS queries (default: all)
-  PRIVATEDNS_LOG_LEVEL        debug|info|warn|error (default: info)
+  PRIVATEDNS_DATA_DIR                Where to keep the SQLite DB + secrets (default: ./data)
+  PRIVATEDNS_PRIVATE_TLD             Private namespace (default: myworld)
+  PRIVATEDNS_DNS_ADDR                DNS listen address (default: :53)
+  PRIVATEDNS_API_ADDR                HTTP API listen address (default: :8080)
+  PRIVATEDNS_UPSTREAMS               Upstream resolvers (default: 1.1.1.1:53,9.9.9.9:53)
+  PRIVATEDNS_ADMIN_EMAIL             Bootstrap admin email (default: admin@local)
+  PRIVATEDNS_ADMIN_PASSWORD          Bootstrap admin password (default: randomly generated, printed once)
+  PRIVATEDNS_ALLOW_QUERY_FROM        CIDRs allowed to send DNS queries (default: all)
+  PRIVATEDNS_ALLOW_RECURSION_FROM    CIDRs allowed to recurse (default: loopback only)
+  PRIVATEDNS_LOG_LEVEL               debug|info|warn|error (default: info)
 `)
 }
 
-func run() error {
+func run(ctx context.Context) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
@@ -80,17 +175,10 @@ func run() error {
 		return fmt.Errorf("mkdir data dir: %w", err)
 	}
 
-	// Configure structured logging.
-	logLevel := slog.LevelInfo
-	switch cfg.LogLevel {
-	case "debug":
-		logLevel = slog.LevelDebug
-	case "warn":
-		logLevel = slog.LevelWarn
-	case "error":
-		logLevel = slog.LevelError
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
+	// Configure structured logging. If stderr is unavailable (Windows service
+	// with no console), fall back to a log file in DataDir/logs/.
+	logHandler := newLogHandler(cfg)
+	slog.SetDefault(slog.New(logHandler))
 
 	// Load or generate the JWT secret.
 	jwtSecret, err := loadOrCreateSecret(filepath.Join(cfg.DataDir, "jwt.key"))
@@ -107,20 +195,20 @@ func run() error {
 	defer st.Close()
 
 	// Bootstrap: create admin, ensure private root zone exists.
-	if err := bootstrap.Run(context.Background(), st, cfg); err != nil {
+	if err := bootstrap.Run(ctx, st, cfg); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
 	// Start DNS server.
 	dnsServer := dnssrv.New(st, cfg)
+	dnsErr := make(chan error, 1)
 	go func() {
 		if err := dnsServer.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error("dns server", "err", err)
-			cancel()
+			dnsErr <- err
+			return
 		}
+		dnsErr <- nil
 	}()
 
 	// Start HTTP API + dashboard.
@@ -133,22 +221,59 @@ func run() error {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+	httpErr := make(chan error, 1)
 	go func() {
 		slog.Info("http.listen", "addr", cfg.APIAddr, "url", displayURL(cfg.APIAddr))
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("http server", "err", err)
-			cancel()
+			httpErr <- err
+			return
 		}
+		httpErr <- nil
 	}()
 
-	<-ctx.Done()
-	slog.Info("shutdown")
+	select {
+	case <-ctx.Done():
+		slog.Info("shutdown")
+	case err := <-dnsErr:
+		slog.Info("dns.exit", "err", err)
+	case err := <-httpErr:
+		slog.Info("http.exit", "err", err)
+	}
 
 	shutdownCtx, sc := context.WithTimeout(context.Background(), 5*time.Second)
 	defer sc()
 	_ = httpSrv.Shutdown(shutdownCtx)
 	dnsServer.Shutdown()
 	return nil
+}
+
+// newLogHandler picks a log destination. If we're running as a Windows
+// Service, stderr is /dev/null equivalent — write to a file inside DataDir.
+// Otherwise (foreground / systemd / launchd), write to stderr and let the
+// init system capture it.
+func newLogHandler(cfg *config.Config) slog.Handler {
+	level := slog.LevelInfo
+	switch cfg.LogLevel {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	opts := &slog.HandlerOptions{Level: level}
+
+	if isSvc, _ := svcmgr.IsWindowsService(); isSvc {
+		logDir := filepath.Join(cfg.DataDir, "logs")
+		_ = os.MkdirAll(logDir, 0o700)
+		f, err := os.OpenFile(filepath.Join(logDir, "privatedns.log"),
+			os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err == nil {
+			return slog.NewJSONHandler(f, opts)
+		}
+	}
+	return slog.NewTextHandler(os.Stderr, opts)
 }
 
 // displayURL renders a friendly URL for a listen address like ":8080" or
@@ -162,11 +287,7 @@ func displayURL(addr string) string {
 }
 
 func splitHostPort(addr string) (host, port string, err error) {
-	// net.SplitHostPort exists but pulls in the net pkg here; do it inline.
-	i := len(addr) - 1
-	for i >= 0 && addr[i] != ':' {
-		i--
-	}
+	i := strings.LastIndexByte(addr, ':')
 	if i < 0 {
 		return "", "", fmt.Errorf("bad addr")
 	}

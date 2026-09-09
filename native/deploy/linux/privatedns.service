@@ -1,0 +1,58 @@
+[Unit]
+Description=privatedns — private DNS + management API
+Documentation=https://github.com/shamil3ilm/domain
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=privatedns
+Group=privatedns
+
+# The env file is written by install.sh — edit it and `systemctl restart privatedns`.
+EnvironmentFile=-/etc/privatedns/privatedns.env
+
+ExecStart=/usr/local/bin/privatedns
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+
+# ---- Security hardening -----------------------------------------------------
+# Give the process CAP_NET_BIND_SERVICE so it can bind port 53 without root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+# Sandbox: /var/lib/privatedns is writable, everything else read-only.
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/privatedns
+StateDirectory=privatedns
+RuntimeDirectory=privatedns
+LogsDirectory=privatedns
+
+# Only need IPv4/IPv6 sockets and unix domain sockets.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @debug
+
+# Journal capture
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=privatedns
+
+[Install]
+WantedBy=multi-user.target

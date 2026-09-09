@@ -25,6 +25,7 @@ native/privatedns.exe
 native/dig
 native/dig.exe
 native/data/
+native/dist/
 *.swp
 *.swo
 .DS_Store
