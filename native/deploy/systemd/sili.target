@@ -1,0 +1,7 @@
+[Unit]
+Description=sili — self-hosted mail + DNS
+Wants=privatedns.service mailservice.service
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target
