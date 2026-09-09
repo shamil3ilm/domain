@@ -1,8 +1,8 @@
 // privatedns — single-binary private DNS + management API.
 //
 // One process. SQLite for storage. Serves:
-//   * DNS on :53 (authoritative for configured zones, forwarder for others)
-//   * HTTP API + dashboard on :8080 (or HTTPS on :8443 with a self-signed cert)
+//   - DNS on :53 (authoritative for configured zones, forwarder for others)
+//   - HTTP API + dashboard on :8080 (or HTTPS on :8443 with a self-signed cert)
 //
 // No Docker required.
 package main
