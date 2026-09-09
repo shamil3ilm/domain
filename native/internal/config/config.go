@@ -4,6 +4,7 @@ package config
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"strings"
 )
@@ -16,8 +17,17 @@ type Config struct {
 	Upstreams     []string
 	AdminEmail    string
 	AdminPassword string // empty means "generate one on first run"
-	AllowFrom     []string
-	LogLevel      string
+
+	// AllowQueryFrom controls who may send DNS queries at all. Empty = allow
+	// everyone (safe when the server is authoritative-only).
+	AllowQueryFrom []string
+
+	// AllowRecursionFrom controls who may cause the server to look up names
+	// outside its own zones. Empty = loopback only. NEVER leave this open to
+	// the Internet — open recursors are abusable amplifiers.
+	AllowRecursionFrom []string
+
+	LogLevel string
 
 	// Populated by main after loading secret file.
 	JWTSecret string
@@ -46,20 +56,22 @@ func Load() (*Config, error) {
 		c.Upstreams = append(c.Upstreams, s)
 	}
 
-	if af := os.Getenv("PRIVATEDNS_ALLOW_FROM"); af != "" {
-		for _, s := range strings.Split(af, ",") {
-			s = strings.TrimSpace(s)
-			if s != "" {
-				c.AllowFrom = append(c.AllowFrom, s)
-			}
-		}
+	// AllowQueryFrom: PRIVATEDNS_ALLOW_QUERY_FROM (or legacy PRIVATEDNS_ALLOW_FROM).
+	c.AllowQueryFrom = parseCIDRList(env2("PRIVATEDNS_ALLOW_QUERY_FROM", "PRIVATEDNS_ALLOW_FROM"))
+
+	// AllowRecursionFrom: default to loopback only. If the operator wants
+	// recursion for LAN/VPN clients they must opt in explicitly.
+	if v := os.Getenv("PRIVATEDNS_ALLOW_RECURSION_FROM"); v != "" {
+		c.AllowRecursionFrom = parseCIDRList(v)
+	} else {
+		c.AllowRecursionFrom = []string{"127.0.0.0/8", "::1/128"}
 	}
 
 	// If no bootstrap password supplied, generate one — main prints it once.
 	if c.AdminPassword == "" {
 		b := make([]byte, 18)
 		if _, err := rand.Read(b); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("generate admin password: %w", err)
 		}
 		c.AdminPassword = base64.RawURLEncoding.EncodeToString(b)
 	}
@@ -67,9 +79,30 @@ func Load() (*Config, error) {
 	return c, nil
 }
 
+func parseCIDRList(v string) []string {
+	if v == "" {
+		return nil
+	}
+	var out []string
+	for _, s := range strings.Split(v, ",") {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func env(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
 	}
 	return def
+}
+
+func env2(primary, fallback string) string {
+	if v := os.Getenv(primary); v != "" {
+		return v
+	}
+	return os.Getenv(fallback)
 }

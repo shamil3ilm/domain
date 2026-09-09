@@ -19,20 +19,22 @@ import (
 )
 
 type Server struct {
-	store   *store.Store
-	cfg     *config.Config
-	udpSrv  *dns.Server
-	tcpSrv  *dns.Server
-	allow   []*net.IPNet
-	upstream *forwarder
+	store        *store.Store
+	cfg          *config.Config
+	udpSrv       *dns.Server
+	tcpSrv       *dns.Server
+	allowQuery   []*net.IPNet // empty = allow all
+	allowRecurse []*net.IPNet // empty = deny all
+	upstream     *forwarder
 }
 
 func New(st *store.Store, cfg *config.Config) *Server {
 	s := &Server{
-		store:    st,
-		cfg:      cfg,
-		allow:    parseCIDRs(cfg.AllowFrom),
-		upstream: newForwarder(cfg.Upstreams),
+		store:        st,
+		cfg:          cfg,
+		allowQuery:   parseCIDRs(cfg.AllowQueryFrom),
+		allowRecurse: parseCIDRs(cfg.AllowRecursionFrom),
+		upstream:     newForwarder(cfg.Upstreams),
 	}
 	return s
 }
@@ -83,7 +85,8 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 		}
 	}()
 
-	if !s.allowed(w.RemoteAddr()) {
+	remoteIP := ipOf(w.RemoteAddr())
+	if !inACL(remoteIP, s.allowQuery, true /* empty = allow */) {
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeRefused)
 		_ = w.WriteMsg(m)
@@ -113,7 +116,18 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	// Otherwise forward.
+	// Recursion path: check the separate ACL. Public exposure is safe here
+	// because non-authoritative queries from outside the recursion ACL are
+	// refused instead of forwarded.
+	if !inACL(remoteIP, s.allowRecurse, false /* empty = deny */) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.RecursionAvailable = false
+		m.Rcode = dns.RcodeRefused
+		_ = w.WriteMsg(m)
+		return
+	}
+
 	s.upstream.forward(w, r)
 }
 
@@ -276,19 +290,27 @@ func buildRR(r store.Record, qname, qtype string) dns.RR {
 
 // ---- ACL ------------------------------------------------------------------
 
-func (s *Server) allowed(a net.Addr) bool {
-	if len(s.allow) == 0 {
-		return true
-	}
+// ipOf extracts the IP from a net.Addr, returning nil on failure.
+func ipOf(a net.Addr) net.IP {
 	host, _, err := net.SplitHostPort(a.String())
 	if err != nil {
-		return false
+		return nil
 	}
-	ip := net.ParseIP(host)
+	return net.ParseIP(host)
+}
+
+// inACL checks whether ip matches any CIDR in acl. When acl is empty, the
+// emptyMeansAllow argument determines the outcome — for query ACL the empty
+// case means "allow all" (unrestricted answering), for recursion ACL the
+// empty case means "deny all" (safe default).
+func inACL(ip net.IP, acl []*net.IPNet, emptyMeansAllow bool) bool {
+	if len(acl) == 0 {
+		return emptyMeansAllow
+	}
 	if ip == nil {
 		return false
 	}
-	for _, cidr := range s.allow {
+	for _, cidr := range acl {
 		if cidr.Contains(ip) {
 			return true
 		}

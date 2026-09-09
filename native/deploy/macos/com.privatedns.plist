@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.privatedns</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/privatedns</string>
+  </array>
+
+  <!-- Load config from the same env-file convention as Linux. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PRIVATEDNS_DATA_DIR</key>
+    <string>/usr/local/var/privatedns</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Binding port 53 needs root on macOS. If you want to run unprivileged,
+       edit the env file to set PRIVATEDNS_DNS_ADDR to a high port and put
+       something like pfctl in front of it, or use Little Snitch. -->
+  <key>UserName</key>
+  <string>root</string>
+
+  <key>StandardOutPath</key>
+  <string>/usr/local/var/log/privatedns.log</string>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/var/log/privatedns.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>Nice</key>
+  <integer>0</integer>
+</dict>
+</plist>
