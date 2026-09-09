@@ -1,0 +1,28 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    stack: privatedns
+
+scrape_configs:
+  - job_name: api
+    static_configs:
+      - targets: ['api:8080']
+    metrics_path: /metrics
+
+  - job_name: pdns-auth
+    # PowerDNS Authoritative exposes prometheus metrics on its webserver.
+    static_configs:
+      - targets: ['pdns-auth:8081']
+    metrics_path: /metrics
+    # PDNS's metrics endpoint requires the API key as a header.
+    # Prometheus can't send arbitrary headers directly, so if you want these
+    # metrics, put an unauthenticated /metrics on the pdns webserver by
+    # setting `webserver-allow-from` to include prometheus's subnet (already
+    # done in compose) — PDNS gates /metrics on IP, not the API key.
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+# Alerting rules live in ./rules/*.yml — mount them and add rule_files here.

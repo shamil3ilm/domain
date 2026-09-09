@@ -1,0 +1,56 @@
+# =============================================================================
+# PowerDNS Authoritative — configuration
+# Values with ${VAR} are substituted from the environment by entrypoint.sh.
+# =============================================================================
+
+# ---- Daemon -----------------------------------------------------------------
+setuid=pdns
+setgid=pdns
+daemon=no
+guardian=no
+disable-syslog=no
+loglevel=4
+log-dns-details=no
+log-dns-queries=no
+
+# ---- Network ----------------------------------------------------------------
+local-address=0.0.0.0
+local-port=53
+# Any device on the compose network can send queries. Recursor is the only
+# intended client; secondaries can also transfer if allowed below.
+allow-axfr-ips=127.0.0.0/8,172.28.0.0/16
+
+# Only allow zone transfer to explicitly configured secondaries. Add IPs here
+# when you add secondaries.
+disable-axfr=no
+allow-notify-from=127.0.0.0/8,172.28.0.0/16
+
+# ---- Backend: PostgreSQL, generic (gpgsql) -----------------------------------
+launch=gpgsql
+gpgsql-host=${PGHOST}
+gpgsql-port=${PGPORT}
+gpgsql-dbname=${PGDATABASE}
+gpgsql-user=${PGUSER}
+gpgsql-password=${PGPASSWORD}
+gpgsql-dnssec=yes
+# The pdns schema is created by our migrations. Tell pdns to look there.
+gpgsql-extra-connection-parameters=options='-c search_path=pdns,public'
+
+# ---- HTTP API ---------------------------------------------------------------
+# Bound to all interfaces on the compose network only. It is NEVER published
+# to the host. The management API in this stack reaches it via
+# http://pdns-auth:8081.
+api=yes
+api-key=${PDNS_API_KEY}
+webserver=yes
+webserver-address=0.0.0.0
+webserver-port=8081
+webserver-allow-from=127.0.0.0/8,172.28.0.0/16
+
+# ---- DNSSEC -----------------------------------------------------------------
+default-soa-content=@ hostmaster.@ 0 10800 3600 604800 3600
+
+# ---- Performance ------------------------------------------------------------
+distributor-threads=3
+receiver-threads=2
+max-cache-entries=1000000

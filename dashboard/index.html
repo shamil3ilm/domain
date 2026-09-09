@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>privatedns</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="app"></div>
+  <template id="tpl-login">
+    <section class="login">
+      <h1>privatedns</h1>
+      <form id="login-form">
+        <label>Email <input type="email" name="email" required autofocus autocomplete="username" /></label>
+        <label>Password <input type="password" name="password" required autocomplete="current-password" /></label>
+        <button type="submit">Sign in</button>
+        <p class="err" data-role="err" hidden></p>
+      </form>
+    </section>
+  </template>
+
+  <template id="tpl-shell">
+    <header class="topbar">
+      <div class="brand">privatedns</div>
+      <nav>
+        <button data-nav="zones">Zones</button>
+        <button data-nav="records">Records</button>
+        <button data-nav="keys">API Keys</button>
+        <button data-nav="users">Users</button>
+        <button data-nav="audit">Audit</button>
+        <button data-nav="health">Health</button>
+      </nav>
+      <div class="user">
+        <span data-role="user-email"></span>
+        <button id="logout">Log out</button>
+      </div>
+    </header>
+    <main id="view"></main>
+    <div id="toast" hidden></div>
+  </template>
+
+  <template id="tpl-zones">
+    <section>
+      <h2>Zones</h2>
+      <form id="create-zone" class="row">
+        <input name="name" placeholder="example.myworld" required />
+        <input name="description" placeholder="description (optional)" />
+        <button type="submit">Create zone</button>
+      </form>
+      <table>
+        <thead><tr><th>Name</th><th>Private?</th><th>Serial</th><th>Description</th><th></th></tr></thead>
+        <tbody data-role="rows"></tbody>
+      </table>
+    </section>
+  </template>
+
+  <template id="tpl-records">
+    <section>
+      <h2>Records</h2>
+      <div class="row">
+        <label>Zone <select data-role="zone-select"></select></label>
+      </div>
+      <form id="upsert-record" class="row">
+        <input name="name" placeholder="www (or blank for @)" />
+        <select name="type">
+          <option>A</option><option>AAAA</option><option>CNAME</option>
+          <option>MX</option><option>TXT</option><option>SRV</option>
+          <option>NS</option><option>CAA</option><option>PTR</option>
+        </select>
+        <input name="value" placeholder="10.10.0.25" required />
+        <input name="ttl" type="number" value="3600" min="30" />
+        <button type="submit">Save</button>
+      </form>
+      <table>
+        <thead><tr><th>Name</th><th>Type</th><th>TTL</th><th>Value</th><th></th></tr></thead>
+        <tbody data-role="rows"></tbody>
+      </table>
+    </section>
+  </template>
+
+  <template id="tpl-keys">
+    <section>
+      <h2>API Keys</h2>
+      <form id="create-key" class="row">
+        <input name="name" placeholder="name (e.g. terraform)" required />
+        <button type="submit">New key</button>
+      </form>
+      <p class="new-key" data-role="new-key" hidden></p>
+      <table>
+        <thead><tr><th>Name</th><th>Prefix</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+        <tbody data-role="rows"></tbody>
+      </table>
+    </section>
+  </template>
+
+  <template id="tpl-users">
+    <section>
+      <h2>Users</h2>
+      <form id="create-user" class="row">
+        <input name="email" type="email" placeholder="user@example.com" required />
+        <input name="password" type="password" placeholder="≥12 chars" required minlength="12" />
+        <select name="role"><option>viewer</option><option>operator</option><option>admin</option></select>
+        <button type="submit">Add user</button>
+      </form>
+      <table>
+        <thead><tr><th>Email</th><th>Role</th><th>Created</th><th>Last login</th><th></th></tr></thead>
+        <tbody data-role="rows"></tbody>
+      </table>
+    </section>
+  </template>
+
+  <template id="tpl-audit">
+    <section>
+      <h2>Audit log</h2>
+      <table>
+        <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Outcome</th></tr></thead>
+        <tbody data-role="rows"></tbody>
+      </table>
+    </section>
+  </template>
+
+  <template id="tpl-health">
+    <section>
+      <h2>Health</h2>
+      <pre data-role="report"></pre>
+    </section>
+  </template>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

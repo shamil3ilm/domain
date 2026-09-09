@@ -1,0 +1,70 @@
+# =============================================================================
+# Caddy — reverse proxy for privatedns.
+#
+#   * Uses step-ca via ACME to obtain internal certs for anything in the
+#     private TLD.
+#   * Serves the dashboard SPA and proxies /api and /healthz/readyz/metrics
+#     to the management API.
+#   * Ships an example vhost for www.example.myworld so end-to-end DNS +
+#     HTTPS verification works out of the box.
+# =============================================================================
+
+{
+	# Global options.
+	admin off
+	# All certificates come from our private CA via ACME.
+	# The ACME endpoint URL is "https://<ca>:9000/acme/acme/directory" for the
+	# default provisioner named "acme".
+	acme_ca https://{$CA_DNS_NAME}:9000/acme/acme/directory
+	# Trust the CA root that entrypoint.sh dropped into /usr/local/share.
+	acme_ca_root /usr/local/share/ca-certificates/privatedns-ca.crt
+	email admin@{$CA_DNS_NAME}
+}
+
+# ---- Dashboard --------------------------------------------------------------
+{$DASHBOARD_DOMAIN} {
+	encode zstd gzip
+	root * /srv/dashboard
+	file_server
+
+	# Proxy API + health endpoints through so the SPA can call same-origin.
+	@api path /api/* /healthz /readyz /metrics /openapi.yaml
+	handle @api {
+		reverse_proxy api:8080
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options    "nosniff"
+		X-Frame-Options           "DENY"
+		Referrer-Policy           "no-referrer"
+	}
+}
+
+# ---- Dedicated API host (useful for automation clients that shouldn't touch dashboard) ---
+{$API_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy api:8080
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options    "nosniff"
+	}
+}
+
+# ---- Example vhost — this is what the README's verification step hits. ------
+# Serves a static page over HTTPS at https://www.example.myworld/.
+www.example.myworld {
+	respond "Hello from www.example.myworld! Your private DNS + private CA + reverse proxy are all working." 200
+	header Content-Type "text/plain; charset=utf-8"
+}
+
+app.example.myworld {
+	respond "app.example.myworld" 200
+	header Content-Type "text/plain; charset=utf-8"
+}
+
+api.example.myworld {
+	# Example: point another API service at an internal address.
+	respond "api.example.myworld (edit reverse-proxy/Caddyfile to point at a real backend)" 200
+	header Content-Type "text/plain; charset=utf-8"
+}
