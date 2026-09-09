@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -26,6 +27,12 @@ type Config struct {
 	// outside its own zones. Empty = loopback only. NEVER leave this open to
 	// the Internet — open recursors are abusable amplifiers.
 	AllowRecursionFrom []string
+
+	// DNS query rate limiting (per source IP, token-bucket). Values <=0
+	// disable limiting; loopback + configured exempt CIDRs bypass regardless.
+	DNSRateLimitPerSec float64
+	DNSRateLimitBurst  int
+	DNSRateLimitExempt []string
 
 	LogLevel string
 
@@ -67,6 +74,23 @@ func Load() (*Config, error) {
 		c.AllowRecursionFrom = []string{"127.0.0.0/8", "::1/128"}
 	}
 
+	// DNS rate limiting. Defaults: 20 QPS steady-state, 40 burst, loopback exempt.
+	rate, err := parseFloatDefault("PRIVATEDNS_DNS_RATE_LIMIT_PER_SEC", 20)
+	if err != nil {
+		return nil, err
+	}
+	burst, err := parseIntDefault("PRIVATEDNS_DNS_RATE_LIMIT_BURST", 40)
+	if err != nil {
+		return nil, err
+	}
+	c.DNSRateLimitPerSec = rate
+	c.DNSRateLimitBurst = burst
+	if v := os.Getenv("PRIVATEDNS_DNS_RATE_LIMIT_EXEMPT_CIDR"); v != "" {
+		c.DNSRateLimitExempt = parseCIDRList(v)
+	} else {
+		c.DNSRateLimitExempt = []string{"127.0.0.0/8", "::1/128"}
+	}
+
 	// If no bootstrap password supplied, generate one — main prints it once.
 	if c.AdminPassword == "" {
 		b := make([]byte, 18)
@@ -105,4 +129,28 @@ func env2(primary, fallback string) string {
 		return v
 	}
 	return os.Getenv(fallback)
+}
+
+func parseFloatDefault(key string, def float64) (float64, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s: invalid float %q: %w", key, v, err)
+	}
+	return n, nil
+}
+
+func parseIntDefault(key string, def int) (int, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s: invalid int %q: %w", key, v, err)
+	}
+	return n, nil
 }
