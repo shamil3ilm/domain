@@ -69,6 +69,7 @@ func New(st *store.Store, cfg *config.Config) http.Handler {
 				r.Post("/zones", a.createZone)
 				r.Delete("/zones/{zone}", a.deleteZone)
 				r.Put("/zones/{zone}/records", a.upsertRecord)
+				r.Put("/zones/{zone}/records:batch", a.batchUpsertRecords)
 				r.Delete("/zones/{zone}/records", a.deleteRecord)
 			})
 
@@ -175,6 +176,9 @@ func validateRRType(t string) error {
 	}
 	return nil
 }
+
+// itoa is a tiny wrapper so callers stay tidy at the call site.
+func itoa(n int) string { return strconv.Itoa(n) }
 
 func parseIntOr(s string, def int) int {
 	n, err := strconv.Atoi(s)
