@@ -5,25 +5,30 @@
 #
 # Usage:
 #   sudo ./install-with-mail.sh --mail-binary <path> --domain <domain> \
-#        [--admin-email admin@local]
+#        [--mail-installer <path>] [--admin-email admin@local]
 #
-# Assumptions verified against mail-service upstream at commit-time:
-#   * mail-service ships deploy/systemd/mailservice.service
-#   * mail-service binary is a single static Go executable installed to
-#     /usr/local/bin/mailservice
-#   * mail-service reads /etc/mailservice/env and uses /var/lib/mailservice
-#     for state
-#   * mail-service ports: HTTP 8035, admin 8036, SMTP 25 (cloud), SUB 587
-#   * mail-service DNS bridge honors MAIL_DNS_PUBLISHER=privatedns +
-#     MAIL_DNS_PUBLISHER_URL/USER/TOKEN
-#   * mail-service does NOT ship its own install.sh — this script installs it
+# Contract verified against the mail-service repo at commit-time:
+#   * mail-service ships deploy/install.sh that accepts `--local-binary <path>`
+#     and handles: binary install to /usr/local/bin/mailservice, mailservice
+#     system user, /etc/mailservice/env template, /var/lib/mailservice state
+#     dir, systemd unit at /etc/systemd/system/mailservice.service, and UFW
+#     rules for 25/587/443. We delegate all of that to it.
+#   * mail-service reads MAIL_DNS_PUBLISHER=privatedns +
+#     MAIL_DNS_PUBLISHER_URL/USER/TOKEN from /etc/mailservice/env
+#     (internal/config/config.go). We only append/update those keys.
 #
-# If any of these change upstream, adjust the constants near the top of this
-# script and re-run — everything except SERVICE_NAME/USER is easy to override.
+# What THIS script owns:
+#   * running privatedns's own installer (if not already installed)
+#   * minting a dedicated API key for the mail-service bridge
+#   * patching the DNS bridge env vars into /etc/mailservice/env
+#   * installing sili.target
+#   * adding UFW rule for 53 (privatedns's port — mail install.sh only opens
+#     25/587/443)
+#   * printing the registrar delegation checklist
 #
 # Idempotency contract: safe to re-run. Preserves existing valid env files,
 # never rotates a working DNS bridge token, adds firewall rules once, and
-# won't fail merely because privatedns is already installed.
+# won't fail merely because privatedns or mail-service is already installed.
 
 set -euo pipefail
 
@@ -32,10 +37,7 @@ readonly PRIVATEDNS_UNIT=/etc/systemd/system/privatedns.service
 readonly PRIVATEDNS_ENV=/etc/privatedns/privatedns.env
 readonly PRIVATEDNS_HEALTH_URL="http://127.0.0.1:8080/healthz"
 
-readonly MAIL_UNIT=/etc/systemd/system/mailservice.service
 readonly MAIL_ENV=/etc/mailservice/env
-readonly MAIL_STATE_DIR=/var/lib/mailservice
-readonly MAIL_UPSTREAM_UNIT_URL="https://raw.githubusercontent.com/shamil3ilm/mail-service/main/deploy/systemd/mailservice.service"
 
 readonly SILI_TARGET=/etc/systemd/system/sili.target
 
@@ -51,19 +53,24 @@ die()  { printf '%s[install]%s %s\n' "$RED" "$RST" "$*" >&2; exit 1; }
 
 # ---- args -------------------------------------------------------------------
 MAIL_BINARY=""
+MAIL_INSTALLER=""
 DOMAIN=""
 ADMIN_EMAIL="admin@local"
 
 usage() {
   cat <<EOF
-Usage: sudo $0 --mail-binary <path> --domain <domain> [--admin-email <email>]
+Usage: sudo $0 --mail-binary <path> --domain <domain>
+              [--mail-installer <path>] [--admin-email <email>]
 
-  --mail-binary   Path to the mail-service binary (built from
-                  github.com/shamil3ilm/mail-service).
-  --domain        Mail domain to prime (e.g. mail.example.com).
-                  A privatedns zone with this name will be created if
-                  it doesn't already exist.
-  --admin-email   privatedns admin email (default: admin@local).
+  --mail-binary     Path to the mail-service binary (built from
+                    github.com/shamil3ilm/mail-service).
+  --domain          Mail domain to prime (e.g. mail.example.com).
+                    A privatedns zone with this name will be created if
+                    it doesn't already exist.
+  --mail-installer  Path to mail-service's deploy/install.sh. If omitted,
+                    we look for it at <mail-binary>/../deploy/install.sh
+                    (i.e. the standard layout of a mail-service checkout).
+  --admin-email     privatedns admin email (default: admin@local).
 
 Reruns are safe.
 EOF
@@ -71,10 +78,11 @@ EOF
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --mail-binary) MAIL_BINARY="$2"; shift 2 ;;
-    --domain)      DOMAIN="$2"; shift 2 ;;
-    --admin-email) ADMIN_EMAIL="$2"; shift 2 ;;
-    -h|--help)     usage; exit 0 ;;
+    --mail-binary)    MAIL_BINARY="$2"; shift 2 ;;
+    --mail-installer) MAIL_INSTALLER="$2"; shift 2 ;;
+    --domain)         DOMAIN="$2"; shift 2 ;;
+    --admin-email)    ADMIN_EMAIL="$2"; shift 2 ;;
+    -h|--help)        usage; exit 0 ;;
     *) die "unknown arg: $1" ;;
   esac
 done
@@ -94,7 +102,7 @@ command -v curl      >/dev/null || die "curl required"
 log "step 1/6: privatedns"
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
-if [ ! -x "$PRIVATEDNS_UNIT" ] || ! systemctl is-enabled privatedns >/dev/null 2>&1; then
+if [ ! -f "$PRIVATEDNS_UNIT" ] || ! systemctl is-enabled privatedns >/dev/null 2>&1; then
   log "  running privatedns installer"
   "$script_dir/install.sh" \
     --tld "$(echo "$DOMAIN" | rev | cut -d. -f1-2 | rev)"
@@ -120,14 +128,15 @@ if ! curl -fsS --max-time 2 "$PRIVATEDNS_HEALTH_URL" >/dev/null 2>&1; then
 fi
 
 # --------------------------------------------------------------------------
-# 3. Get/create a bridge credential for mail-service
+# 3. Bridge credential
 # --------------------------------------------------------------------------
+#
+# Prefer an API key over the admin password: one-click revocation and it
+# doesn't disrupt the operator's login when rotated. This uses privatedns's
+# existing POST /api/v1/keys endpoint (see internal/httpapi/server.go).
 
 log "step 3/6: bridge credential"
 
-# Prefer an API key over the admin password — one-click revocation. We check
-# if a key with a marker name already exists on the local mail-service env
-# file; if so, keep it. Otherwise mint a new one.
 BRIDGE_TOKEN=""
 if [ -f "$MAIL_ENV" ] && grep -q '^MAIL_DNS_PUBLISHER_TOKEN=' "$MAIL_ENV"; then
   existing=$(grep '^MAIL_DNS_PUBLISHER_TOKEN=' "$MAIL_ENV" | cut -d= -f2-)
@@ -138,106 +147,82 @@ if [ -f "$MAIL_ENV" ] && grep -q '^MAIL_DNS_PUBLISHER_TOKEN=' "$MAIL_ENV"; then
 fi
 
 if [ -z "$BRIDGE_TOKEN" ]; then
-  log "  minting a fresh API key via privatedns login"
-  # Log in as admin to obtain a JWT, then create an API key.
+  log "  minting a fresh API key via privatedns"
   admin_pw=$(grep '^PRIVATEDNS_ADMIN_PASSWORD=' "$PRIVATEDNS_ENV" | cut -d= -f2-)
-  admin_email=$(grep '^PRIVATEDNS_ADMIN_EMAIL='    "$PRIVATEDNS_ENV" | cut -d= -f2-)
+  admin_email=$(grep '^PRIVATEDNS_ADMIN_EMAIL='   "$PRIVATEDNS_ENV" | cut -d= -f2- || true)
+  [ -n "$admin_email" ] || admin_email="$ADMIN_EMAIL"
   [ -n "$admin_pw" ] || die "cannot read admin password from $PRIVATEDNS_ENV"
 
-  # Login
-  jwt=$(curl -fsS -X POST http://127.0.0.1:8080/api/v1/auth/login \
+  # Login. Body pushed via stdin so the password never appears in argv.
+  login_body=$(printf '{"email":"%s","password":"%s"}' "$admin_email" "$admin_pw")
+  jwt=$(printf '%s' "$login_body" | curl -fsS -X POST \
+    http://127.0.0.1:8080/api/v1/auth/login \
     -H 'content-type: application/json' \
-    -d "{\"email\":\"$admin_email\",\"password\":\"$admin_pw\"}" \
+    --data-binary @- \
     | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
   [ -n "$jwt" ] || die "login to privatedns failed"
 
-  # Create key
+  # Create dedicated API key for the bridge.
   BRIDGE_TOKEN=$(curl -fsS -X POST http://127.0.0.1:8080/api/v1/keys \
     -H "authorization: bearer $jwt" -H 'content-type: application/json' \
     -d '{"name":"mail-service-bridge"}' \
     | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
-  [ -n "$BRIDGE_TOKEN" ] || die "could not mint API key"
+  [ -n "$BRIDGE_TOKEN" ] || die "could not mint API key at POST /api/v1/keys"
   log "  minted key (redacted); stored only in $MAIL_ENV"
 fi
 
 # --------------------------------------------------------------------------
-# 4. Install mail-service
+# 4. mail-service — delegate to its own installer
 # --------------------------------------------------------------------------
 
-log "step 4/6: mail-service"
+log "step 4/6: mail-service (delegating to its installer)"
 
-# 4a. Binary
-install -m 0755 -o root -g root "$MAIL_BINARY" /usr/local/bin/mailservice
-
-# 4b. User + dirs
-if ! getent passwd mailservice >/dev/null; then
-  useradd --system --no-create-home --shell /usr/sbin/nologin --user-group mailservice
+# Locate the mail-service installer. We refuse to guess: either the operator
+# passes --mail-installer, or we look at the canonical location inside a
+# mail-service checkout (deploy/install.sh sibling to bin/mailservice). If
+# neither works, we stop — inventing a new interface silently is exactly
+# what the joint-installer spec forbids.
+if [ -z "$MAIL_INSTALLER" ]; then
+  candidate="$(cd "$(dirname "$MAIL_BINARY")/.." 2>/dev/null && pwd)/deploy/install.sh"
+  if [ -f "$candidate" ]; then
+    MAIL_INSTALLER="$candidate"
+    log "  found mail-service installer alongside binary: $MAIL_INSTALLER"
+  fi
 fi
-install -d -m 0750 -o mailservice -g mailservice "$MAIL_STATE_DIR"
-install -d -m 0750 -o root        -g mailservice /etc/mailservice
-
-# 4c. Env file — only overwrite if we lack a valid one. Otherwise update the
-# bridge token line in place, leaving user-set values alone.
-if [ ! -f "$MAIL_ENV" ]; then
-  umask 077
-  cat > "$MAIL_ENV" <<EOF
-# Managed by install-with-mail.sh. Edit and: systemctl restart mailservice
-MAIL_MODE=cloud
-MAIL_LISTEN_ADDR=0.0.0.0
-MAIL_LOG_LEVEL=info
-MAIL_LOG_FORMAT=json
-
-MAIL_HTTP_PORT=8035
-MAIL_ADMIN_PORT=8036
-MAIL_SMTP_PORT=25
-MAIL_SUBMISSION_PORT=587
-
-MAIL_DB_PATH=$MAIL_STATE_DIR/mail.db
-MAIL_RAW_STORE_PATH=$MAIL_STATE_DIR/raw
-
-MAIL_AUTO_VERIFY_DOMAINS=.test,.local,.localhost
-MAIL_DEFAULT_MAILBOX_MODE=capture
-MAIL_RELAY_PROVIDER=none
-
-# DNS bridge → local privatedns
-MAIL_DNS_PUBLISHER=privatedns
-MAIL_DNS_PUBLISHER_URL=http://127.0.0.1:8080
-MAIL_DNS_PUBLISHER_USER=$ADMIN_EMAIL
-MAIL_DNS_PUBLISHER_TOKEN=$BRIDGE_TOKEN
-
-MAIL_SHUTDOWN_TIMEOUT=15s
-EOF
-  chown root:mailservice "$MAIL_ENV"
-  chmod 0640 "$MAIL_ENV"
-  log "  wrote $MAIL_ENV"
-else
-  # Idempotent update: replace or add the DNS bridge lines, leave everything else.
-  set_env() {
-    local key="$1" val="$2"
-    if grep -q "^${key}=" "$MAIL_ENV"; then
-      # Use `|` as sed delimiter — token may contain slashes.
-      sed -i "s|^${key}=.*|${key}=${val}|" "$MAIL_ENV"
-    else
-      printf '%s=%s\n' "$key" "$val" >> "$MAIL_ENV"
-    fi
-  }
-  set_env MAIL_DNS_PUBLISHER       privatedns
-  set_env MAIL_DNS_PUBLISHER_URL   http://127.0.0.1:8080
-  set_env MAIL_DNS_PUBLISHER_USER  "$ADMIN_EMAIL"
-  set_env MAIL_DNS_PUBLISHER_TOKEN "$BRIDGE_TOKEN"
-  chown root:mailservice "$MAIL_ENV"
-  chmod 0640 "$MAIL_ENV"
-  log "  updated bridge config in $MAIL_ENV (other keys preserved)"
+if [ -z "$MAIL_INSTALLER" ]; then
+  die "cannot locate mail-service's deploy/install.sh. Clone the mail-service
+     repo so the binary and installer are colocated, or pass explicitly:
+       --mail-installer /path/to/mail-service/deploy/install.sh"
 fi
+[ -f "$MAIL_INSTALLER" ] && [ -x "$MAIL_INSTALLER" ] || die "not an executable installer: $MAIL_INSTALLER"
 
-# 4d. Systemd unit — fetch upstream if we don't already have it.
-if [ ! -f "$MAIL_UNIT" ]; then
-  log "  fetching mailservice.service unit from upstream"
-  curl -fsS -o "$MAIL_UNIT" "$MAIL_UPSTREAM_UNIT_URL" \
-    || die "could not fetch $MAIL_UPSTREAM_UNIT_URL — check network or supply manually"
-  chown root:root "$MAIL_UNIT"
-  chmod 0644 "$MAIL_UNIT"
-fi
+# mail-service install.sh contract: --local-binary <path> installs binary,
+# system user, env template, state dir, systemd unit, and UFW rules for
+# 25/587/443. Idempotent per its own comment.
+log "  running: $MAIL_INSTALLER --local-binary $MAIL_BINARY"
+"$MAIL_INSTALLER" --local-binary "$MAIL_BINARY"
+
+# Patch DNS bridge env vars into the env file the mail installer wrote.
+# Preserve everything else — the operator will edit relay creds and cloud
+# hostname independently.
+[ -f "$MAIL_ENV" ] || die "$MAIL_ENV not created by mail-service installer"
+
+set_env() {
+  local key="$1" val="$2"
+  if grep -q "^${key}=" "$MAIL_ENV"; then
+    # Use `|` as sed delimiter — token may contain slashes.
+    sed -i "s|^${key}=.*|${key}=${val}|" "$MAIL_ENV"
+  else
+    printf '%s=%s\n' "$key" "$val" >> "$MAIL_ENV"
+  fi
+}
+set_env MAIL_DNS_PUBLISHER       privatedns
+set_env MAIL_DNS_PUBLISHER_URL   http://127.0.0.1:8080
+set_env MAIL_DNS_PUBLISHER_USER  "$ADMIN_EMAIL"
+set_env MAIL_DNS_PUBLISHER_TOKEN "$BRIDGE_TOKEN"
+chown root:mailservice "$MAIL_ENV"
+chmod 0640 "$MAIL_ENV"
+log "  patched DNS bridge config into $MAIL_ENV (other keys preserved)"
 
 systemctl daemon-reload
 systemctl enable mailservice >/dev/null
@@ -255,37 +240,35 @@ systemctl enable sili.target >/dev/null
 log "  sili.target enabled — 'systemctl start sili.target' brings up both services"
 
 # --------------------------------------------------------------------------
-# 6. Firewall — idempotent UFW rules if ufw is present + already active
+# 6. Firewall — add DNS (53) on top of what mail install.sh opened
 # --------------------------------------------------------------------------
+#
+# mail-service's installer already handles 25/587/443. We only add 53
+# (tcp+udp) here — the DNS listener. Never enable UFW ourselves; doing so
+# on a fresh SSH session locks the admin out.
 
-log "step 6/6: firewall"
+log "step 6/6: firewall (DNS port 53)"
 if command -v ufw >/dev/null; then
-  # Don't enable UFW here — enabling on a fresh SSH session locks the admin
-  # out. We only add rules if UFW is already enabled by the operator.
   if ufw status 2>/dev/null | grep -q '^Status: active'; then
-    for rule in "22/tcp" "25/tcp" "53/tcp" "53/udp" "587/tcp" "443/tcp"; do
-      # UFW dedupes silently, but grep is a cheaper visible signal.
-      if ! ufw status | grep -q " ${rule%%/*}/${rule##*/}"; then
+    for rule in "53/tcp" "53/udp"; do
+      if ! ufw status | grep -q " ${rule}"; then
         ufw allow "$rule" >/dev/null
       fi
     done
-    log "  UFW rules verified (22, 25, 53, 587, 443)"
+    log "  UFW rules verified (53/tcp, 53/udp)"
   else
-    warn "  UFW is installed but not enabled. Not enabling automatically —"
-    warn "  doing so may lock you out via SSH. When ready, run:"
-    warn "    sudo ufw allow ssh && sudo ufw allow 25/tcp && sudo ufw allow 53/tcp"
-    warn "    sudo ufw allow 53/udp && sudo ufw allow 587/tcp && sudo ufw allow 443/tcp"
-    warn "    sudo ufw enable"
+    warn "  UFW installed but not enabled. When you enable it, also allow:"
+    warn "    sudo ufw allow 53/tcp && sudo ufw allow 53/udp"
   fi
 else
-  warn "  ufw not installed. Configure your firewall to allow: 22, 25, 53, 587, 443."
+  warn "  ufw not installed. Configure your firewall to allow DNS: 53/tcp, 53/udp."
+  warn "  (mail-service's installer already documented 25/587/443.)"
 fi
 
 # --------------------------------------------------------------------------
 # DNS output — what the admin has to configure at the registrar
 # --------------------------------------------------------------------------
 
-# Best-effort public IP.
 public_ip=$(curl -fsS --max-time 3 https://api.ipify.org 2>/dev/null || echo "<VPS-PUBLIC-IP>")
 public_ip6=$(curl -fsS --max-time 3 https://api6.ipify.org 2>/dev/null || echo "")
 
@@ -332,6 +315,5 @@ Check services with:
 
 Health:
   curl -sS http://127.0.0.1:8080/healthz     # privatedns
-  curl -sS http://127.0.0.1:8035/healthz     # mail-service (once its HTTP is up)
 ================================================================================
 EOF
