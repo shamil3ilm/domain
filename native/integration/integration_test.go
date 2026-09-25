@@ -346,6 +346,180 @@ func TestIntegration_LoginLockout(t *testing.T) {
 	}
 }
 
+// TestIntegration_AXFR: seed a zone via the API, then act as a secondary
+// DNS server and pull the whole zone via AXFR. Assert the SOA framing is
+// correct and every record we wrote comes back.
+func TestIntegration_AXFR(t *testing.T) {
+	s := bootStack(t)
+	// The default bootStack config has AXFRAllowFrom empty (deny). Reboot
+	// on top of the same store isn't possible mid-test; instead, monkey-
+	// patch the server's ACL by rebuilding a Server with an allow list.
+	//
+	// Simpler and honest: create a second bootstrap that allows loopback.
+	_ = s // unused — we build our own here so the ACL is right.
+
+	dir := t.TempDir()
+	apiPort, _ := freePort()
+	dnsPort, _ := freePort()
+	cfg := &config.Config{
+		DataDir:            dir,
+		PrivateTLD:         "test",
+		DNSAddr:            fmt.Sprintf("127.0.0.1:%d", dnsPort),
+		APIAddr:            fmt.Sprintf("127.0.0.1:%d", apiPort),
+		AdminEmail:         "admin@integration",
+		AdminPassword:      "integration-axfr-pw-12345",
+		AllowRecursionFrom: []string{"127.0.0.0/8"},
+		AXFRAllowFrom:      []string{"127.0.0.0/8"},
+		DNSRateLimitPerSec: 1000,
+		DNSRateLimitBurst:  1000,
+		DNSRateLimitExempt: []string{"127.0.0.0/8"},
+		LoginMaxAttempts:   5,
+		LoginLockoutWindow: 15 * time.Minute,
+		JWTSecret:          "integration-secret-axfr",
+	}
+	st, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := bootstrap.Run(context.Background(), st, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	dnsSrv := dnssrv.New(st, cfg)
+	dnsCtx, dnsCancel := context.WithCancel(context.Background())
+	go func() { _ = dnsSrv.Start(dnsCtx) }()
+	t.Cleanup(func() { dnsCancel(); dnsSrv.Shutdown() })
+
+	httpSrv := &http.Server{Addr: cfg.APIAddr, Handler: httpapi.New(st, cfg), ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = httpSrv.ListenAndServe() }()
+	t.Cleanup(func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(shutCtx)
+	})
+	if err := waitTCP(cfg.APIAddr, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitTCP(cfg.DNSAddr, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	// Log in + seed a few records.
+	loginBody, _ := json.Marshal(map[string]string{
+		"email": cfg.AdminEmail, "password": cfg.AdminPassword,
+	})
+	lr, err := http.Post("http://"+cfg.APIAddr+"/api/v1/auth/login", "application/json", bytes.NewReader(loginBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tokPayload struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(lr.Body).Decode(&tokPayload); err != nil {
+		t.Fatal(err)
+	}
+	lr.Body.Close()
+
+	authed := func(method, path string, body any) *http.Response {
+		var r *bytes.Reader
+		if body != nil {
+			b, _ := json.Marshal(body)
+			r = bytes.NewReader(b)
+		} else {
+			r = bytes.NewReader(nil)
+		}
+		req, _ := http.NewRequest(method, "http://"+cfg.APIAddr+path, r)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+tokPayload.Token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	if r := authed(http.MethodPost, "/api/v1/zones",
+		map[string]string{"name": "axfr.test"}); r.StatusCode != 201 {
+		t.Fatalf("create zone status=%d", r.StatusCode)
+	}
+	seed := []map[string]any{
+		{"name": "www", "type": "A", "value": "10.99.0.1"},
+		{"name": "api", "type": "A", "value": "10.99.0.2"},
+		{"name": "mx", "type": "MX", "value": "10 mail.axfr.test."},
+	}
+	for _, rec := range seed {
+		if r := authed(http.MethodPut, "/api/v1/zones/axfr.test/records", rec); r.StatusCode != 200 {
+			t.Fatalf("upsert %v status=%d", rec, r.StatusCode)
+		}
+	}
+
+	// Perform an AXFR as a loopback client would. miekg's Transfer.In gives
+	// us the envelope stream directly.
+	tr := new(dns.Transfer)
+	m := new(dns.Msg)
+	m.SetAxfr("axfr.test.")
+	envelopes, err := tr.In(m, cfg.DNSAddr)
+	if err != nil {
+		t.Fatalf("axfr.In: %v", err)
+	}
+
+	var rrs []dns.RR
+	for env := range envelopes {
+		if env.Error != nil {
+			t.Fatalf("envelope error: %v", env.Error)
+		}
+		rrs = append(rrs, env.RR...)
+	}
+
+	// Contract: SOA at the head, SOA at the tail, our three records in between.
+	if len(rrs) < 5 {
+		t.Fatalf("expected >=5 RRs (SOA + 3 + SOA), got %d", len(rrs))
+	}
+	if _, ok := rrs[0].(*dns.SOA); !ok {
+		t.Errorf("first RR should be SOA, got %T", rrs[0])
+	}
+	if _, ok := rrs[len(rrs)-1].(*dns.SOA); !ok {
+		t.Errorf("last RR should be SOA, got %T", rrs[len(rrs)-1])
+	}
+
+	// Every seeded value shows up somewhere in the middle.
+	got := ""
+	for _, rr := range rrs {
+		got += rr.String() + "\n"
+	}
+	for _, want := range []string{"10.99.0.1", "10.99.0.2", "mail.axfr.test."} {
+		if !strings.Contains(got, want) {
+			t.Errorf("AXFR output missing %q\nfull dump:\n%s", want, got)
+		}
+	}
+}
+
+// TestIntegration_AXFR_Refused: a client outside the AXFR ACL gets REFUSED.
+// Our loopback ACL trick means we prove this by leaving the default empty
+// AXFRAllowFrom in place — every source (including loopback) is denied.
+func TestIntegration_AXFR_Refused(t *testing.T) {
+	s := bootStack(t) // default AXFRAllowFrom is empty
+	tr := new(dns.Transfer)
+	m := new(dns.Msg)
+	m.SetAxfr("myworld.")
+	envelopes, err := tr.In(m, s.dnsAddr)
+	if err != nil {
+		// A miekg-side error is also an acceptable "no dice" — server may
+		// close the connection or return REFUSED. Both mean transfer denied.
+		return
+	}
+	for env := range envelopes {
+		if env.Error != nil {
+			return // acceptable: server signalled failure through the channel.
+		}
+		// If we get here with real RRs, the ACL is broken.
+		if len(env.RR) > 0 {
+			t.Fatalf("expected AXFR to be refused, but received %d RRs", len(env.RR))
+		}
+	}
+}
+
 // TestIntegration_HTTPS: same auth+CRUD flow but the API is served over
 // HTTPS using a self-signed cert generated on first boot. The client trusts
 // only that specific cert — no InsecureSkipVerify — so the test proves the

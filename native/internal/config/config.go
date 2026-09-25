@@ -50,6 +50,11 @@ type Config struct {
 	APITLSKey   string
 	APITLSHosts []string
 
+	// AXFRAllowFrom is the IP allow-list for zone transfers. Empty = deny.
+	// TSIG isn't wired yet — this is an IP-based ACL and MUST NOT be set
+	// wider than the network the secondaries actually live on. See docs.
+	AXFRAllowFrom []string
+
 	LogLevel string
 
 	// Populated by main after loading secret file.
@@ -142,6 +147,9 @@ func Load() (*Config, error) {
 			}
 		}
 	}
+
+	// AXFR allow-list. Default empty = deny — secondary DNS is opt-in.
+	c.AXFRAllowFrom = parseCIDRList(os.Getenv("PRIVATEDNS_AXFR_ALLOW_FROM"))
 
 	// If no bootstrap password supplied, generate one — main prints it once.
 	if c.AdminPassword == "" {

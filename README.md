@@ -134,6 +134,7 @@ Everything is environment variables. Defaults are safe.
 | `PRIVATEDNS_API_TLS_CERT`         |                      | Cert path (`cert` mode)                                   |
 | `PRIVATEDNS_API_TLS_KEY`          |                      | Key path (`cert` mode)                                    |
 | `PRIVATEDNS_API_TLS_HOSTS`        |                      | Comma-separated SANs for the auto-generated cert          |
+| `PRIVATEDNS_AXFR_ALLOW_FROM`      | *empty (deny)*       | CIDRs allowed to pull zones via AXFR (secondaries)        |
 | `PRIVATEDNS_LOG_LEVEL`            | `info`               | debug / info / warn / error                               |
 
 **Security note:** never set `PRIVATEDNS_ALLOW_RECURSION_FROM` to

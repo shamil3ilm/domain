@@ -23,7 +23,36 @@ Steps:
 If you also want the authoritative server to be redundant, deploy secondaries
 that AXFR zones from the primary.
 
-### Set up the primary for zone transfers
+### Native binary (v0.4.0+)
+
+The single-binary path supports AXFR out of the box. Turn it on with an IP
+allow-list — leave empty (the default) to disable transfers entirely.
+
+```bash
+# /etc/privatedns/privatedns.env (or wherever your env lives)
+PRIVATEDNS_AXFR_ALLOW_FROM=10.10.0.20/32,10.10.0.21/32
+```
+
+**Test from a secondary or your desktop:**
+
+```bash
+dig @<primary-ip> AXFR example.myworld
+```
+
+Expected: a full zone dump framed by SOA at both ends.
+
+Point any standards-compliant AXFR consumer at the primary — `nsd`, Knot,
+BIND9, or another `privatedns` instance acting as a secondary. `privatedns`
+does not currently ship its own "slave" mode; it serves AXFR but doesn't
+consume it. The typical setup is a public authoritative in front of the
+Internet + a hidden primary that only the secondaries can AXFR from.
+
+**Security posture:** the AXFR ACL is IP-based only in this version.
+TSIG-authenticated transfers are on the roadmap. Never widen
+`PRIVATEDNS_AXFR_ALLOW_FROM` beyond the network your secondaries live on
+— a stranger with AXFR access can dump the entire zone.
+
+### Docker variant — set up the primary for zone transfers
 
 In `dns/authoritative/pdns.conf.template`, add:
 
