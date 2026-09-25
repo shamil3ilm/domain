@@ -26,6 +26,7 @@ import (
 	"github.com/privatedns/native/internal/config"
 	"github.com/privatedns/native/internal/dnssrv"
 	"github.com/privatedns/native/internal/httpapi"
+	"github.com/privatedns/native/internal/metrics"
 	"github.com/privatedns/native/internal/store"
 	"github.com/privatedns/native/internal/svcmgr"
 )
@@ -182,6 +183,9 @@ func run(ctx context.Context) error {
 	// with no console), fall back to a log file in DataDir/logs/.
 	logHandler := newLogHandler(cfg)
 	slog.SetDefault(slog.New(logHandler))
+
+	// Publish build info so Grafana can group by version.
+	metrics.SetBuildInfo(version)
 
 	// Load or generate the JWT secret.
 	jwtSecret, err := loadOrCreateSecret(filepath.Join(cfg.DataDir, "jwt.key"))

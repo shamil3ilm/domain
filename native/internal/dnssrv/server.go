@@ -15,6 +15,7 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/privatedns/native/internal/config"
+	"github.com/privatedns/native/internal/metrics"
 	"github.com/privatedns/native/internal/store"
 )
 
@@ -79,23 +80,62 @@ func (s *Server) Shutdown() {
 	}
 }
 
+// metricsWriter wraps dns.ResponseWriter to capture the outgoing rcode so
+// the handler's deferred metrics-record path knows what response we sent.
+// Zero-cost wrapper — just remembers a couple of bytes off the last message.
+type metricsWriter struct {
+	dns.ResponseWriter
+	rcode   int
+	written bool
+}
+
+func (mw *metricsWriter) WriteMsg(m *dns.Msg) error {
+	mw.rcode = m.Rcode
+	mw.written = true
+	return mw.ResponseWriter.WriteMsg(m)
+}
+
+// rcodeLabel returns a Prometheus-safe short string for the outgoing rcode,
+// falling back to a special "DROPPED" label when the handler returned
+// without writing a response (rate-limit path).
+func rcodeLabel(mw *metricsWriter) string {
+	if !mw.written {
+		return "DROPPED"
+	}
+	if s, ok := dns.RcodeToString[mw.rcode]; ok {
+		return s
+	}
+	return "OTHER"
+}
+
 // handle is the main dispatch. Any panic is recovered so a single bad query
 // can't take down the server.
 func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
+	start := time.Now()
+	mw := &metricsWriter{ResponseWriter: w}
+	qtypeLabel := "UNKNOWN"
+	if len(r.Question) > 0 {
+		if s, ok := dns.TypeToString[r.Question[0].Qtype]; ok {
+			qtypeLabel = s
+		}
+	}
 	defer func() {
 		if p := recover(); p != nil {
 			slog.Error("dns.panic", "recover", p)
 			m := new(dns.Msg)
 			m.SetRcode(r, dns.RcodeServerFailure)
-			_ = w.WriteMsg(m)
+			_ = mw.WriteMsg(m)
 		}
+		metrics.DNSQueriesTotal.WithLabelValues(qtypeLabel, rcodeLabel(mw)).Inc()
+		metrics.DNSQueryDuration.WithLabelValues(qtypeLabel).Observe(time.Since(start).Seconds())
 	}()
 
-	remoteIP := ipOf(w.RemoteAddr())
+	remoteIP := ipOf(mw.RemoteAddr())
 	if !inACL(remoteIP, s.allowQuery, true /* empty = allow */) {
+		metrics.DNSACLRefusals.WithLabelValues("query").Inc()
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeRefused)
-		_ = w.WriteMsg(m)
+		_ = mw.WriteMsg(m)
 		return
 	}
 
@@ -103,6 +143,7 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 	// no error log — over-limit responses would themselves be amplification
 	// vectors. Debug log lets operators see it if they need to.
 	if !s.limiter.Allow(remoteIP) {
+		metrics.DNSRateLimitDrops.Inc()
 		slog.Debug("dns.ratelimited", "ip", remoteIP)
 		return
 	}
@@ -110,7 +151,7 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 	if len(r.Question) == 0 {
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeFormatError)
-		_ = w.WriteMsg(m)
+		_ = mw.WriteMsg(m)
 		return
 	}
 
@@ -126,7 +167,7 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 		slog.Warn("dns.zone_lookup", "err", err)
 	}
 	if zone != "" {
-		s.answerAuthoritatively(ctx, w, r, zone, qname, q.Qtype)
+		s.answerAuthoritatively(ctx, mw, r, zone, qname, q.Qtype)
 		return
 	}
 
@@ -134,15 +175,16 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 	// because non-authoritative queries from outside the recursion ACL are
 	// refused instead of forwarded.
 	if !inACL(remoteIP, s.allowRecurse, false /* empty = deny */) {
+		metrics.DNSACLRefusals.WithLabelValues("recursion").Inc()
 		m := new(dns.Msg)
 		m.SetReply(r)
 		m.RecursionAvailable = false
 		m.Rcode = dns.RcodeRefused
-		_ = w.WriteMsg(m)
+		_ = mw.WriteMsg(m)
 		return
 	}
 
-	s.upstream.forward(w, r)
+	s.upstream.forward(mw, r)
 }
 
 // answerAuthoritatively builds and sends a response using records from the DB.

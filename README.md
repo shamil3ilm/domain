@@ -19,6 +19,8 @@ a service on Windows, Linux, or macOS.
   Windows; systemd + launchd units for Linux and macOS.
 - 🛡️ **RBAC + audit log.** Admin / Operator / Viewer roles, JWT + API key auth,
   every mutation logged.
+- 📈 **Prometheus metrics** on `/metrics` — DNS QPS by type/rcode, latency
+  histogram, rate-limit drops, HTTP request counter, Go runtime metrics.
 - 🌍 **Cross-platform.** Prebuilt for linux/{amd64,arm64,arm}, windows/{amd64,arm64},
   darwin/{amd64,arm64}. Runs on a Raspberry Pi.
 

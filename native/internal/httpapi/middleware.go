@@ -5,13 +5,16 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"golang.org/x/time/rate"
 
+	"github.com/privatedns/native/internal/metrics"
 	"github.com/privatedns/native/internal/store"
 )
 
@@ -81,14 +84,24 @@ func accessLog(next http.Handler) http.Handler {
 		start := time.Now()
 		rr := &respRec{ResponseWriter: w}
 		next.ServeHTTP(rr, r)
+		dur := time.Since(start)
 		slog.Info("http",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", rr.status,
 			"bytes", rr.bytes,
-			"dur_ms", time.Since(start).Milliseconds(),
+			"dur_ms", dur.Milliseconds(),
 			"ip", realIP(r),
 		)
+		// Metrics: label by chi route pattern (not raw path — cardinality).
+		// If the request never matched a chi route the pattern is empty; fall
+		// back to "unknown" so we don't emit a series with an empty label.
+		route := chi.RouteContext(r.Context()).RoutePattern()
+		if route == "" {
+			route = "unknown"
+		}
+		metrics.HTTPRequestsTotal.WithLabelValues(r.Method, route, strconv.Itoa(rr.status)).Inc()
+		metrics.HTTPRequestDuration.WithLabelValues(r.Method, route).Observe(dur.Seconds())
 	})
 }
 
