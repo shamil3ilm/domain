@@ -523,6 +523,14 @@ func (a *apiServer) createKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name required")
 		return
 	}
+	// Reject unknown scope names at creation. Silent-typo scopes would grant
+	// nothing at runtime, which is a foot-gun.
+	for _, s := range req.Scopes {
+		if !isKnownScope(s) {
+			writeError(w, http.StatusBadRequest, "unknown scope: "+s)
+			return
+		}
+	}
 	p, _ := principalFrom(r.Context())
 	nk, err := generateAPIKey()
 	if err != nil {

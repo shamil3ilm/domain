@@ -220,6 +220,22 @@ paths:
         "200": { description: OK }
     post:
       summary: Create a new API key. Token is returned once.
+      description: |
+        Scopes are enforced at request time. Omit `scopes` (or send an
+        empty list) to mint a legacy full-power key that inherits from the
+        owner's role — this is what old keys got and remains the default
+        for backward compatibility.
+
+        Known scopes:
+          - `zones:read`, `zones:write`
+          - `records:read`, `records:write`
+          - `users:read`, `users:write`
+          - `audit:read`
+          - `keys:manage`
+          - `*` (wildcard — grants every scope)
+
+        Unknown scope names are rejected with 400. JWT sessions never
+        carry scopes; role-based access still governs them.
       requestBody:
         required: true
         content:
@@ -228,10 +244,15 @@ paths:
               type: object
               required: [name]
               properties:
-                name:   { type: string }
-                scopes: { type: array, items: { type: string } }
+                name: { type: string }
+                scopes:
+                  type: array
+                  items:
+                    type: string
+                    enum: ["*", zones:read, zones:write, records:read, records:write, users:read, users:write, audit:read, keys:manage]
       responses:
         "201": { description: Created }
+        "400": { description: Unknown scope name }
 
   /keys/{id}:
     parameters:

@@ -54,39 +54,48 @@ func New(st *store.Store, cfg *config.Config) http.Handler {
 	r.Handle("/metrics", metrics.Handler())
 
 	// API routes.
+	//
+	// Scope enforcement: applied per-endpoint via requireScopes. JWT sessions
+	// and legacy API keys with no declared scopes pass through (role check
+	// still governs). Keys with a non-empty scope list must match.
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Post("/auth/login", a.login)
 
 		r.Group(func(r chi.Router) {
 			r.Use(a.authMiddleware)
 
+			// Auth introspection: no scope needed. The key is already proven
+			// valid by authMiddleware, and /me/logout only affects the caller.
 			r.Get("/auth/me", a.me)
 			r.Post("/auth/logout", a.logout)
 
-			r.Get("/zones", a.listZones)
-			r.Get("/zones/{zone}", a.getZone)
-			r.Get("/zones/{zone}/records", a.listRecords)
+			r.With(requireScopes(ScopeZonesRead)).Get("/zones", a.listZones)
+			r.With(requireScopes(ScopeZonesRead)).Get("/zones/{zone}", a.getZone)
+			r.With(requireScopes(ScopeRecordsRead)).Get("/zones/{zone}/records", a.listRecords)
 
+			// A caller's own API-key management is always tied to the JWT
+			// session, not to the key itself — a scoped key that could mint
+			// unscoped keys would be a scope-escalation bug.
 			r.Get("/keys", a.listKeys)
 			r.Post("/keys", a.createKey)
 			r.Delete("/keys/{id}", a.deleteKey)
 
-			r.Get("/audit", a.listAudit)
+			r.With(requireScopes(ScopeAuditRead)).Get("/audit", a.listAudit)
 
 			r.Group(func(r chi.Router) {
 				r.Use(requireRole(store.RoleAdmin, store.RoleOperator))
-				r.Post("/zones", a.createZone)
-				r.Delete("/zones/{zone}", a.deleteZone)
-				r.Put("/zones/{zone}/records", a.upsertRecord)
-				r.Put("/zones/{zone}/records:batch", a.batchUpsertRecords)
-				r.Delete("/zones/{zone}/records", a.deleteRecord)
+				r.With(requireScopes(ScopeZonesWrite)).Post("/zones", a.createZone)
+				r.With(requireScopes(ScopeZonesWrite)).Delete("/zones/{zone}", a.deleteZone)
+				r.With(requireScopes(ScopeRecordsWrite)).Put("/zones/{zone}/records", a.upsertRecord)
+				r.With(requireScopes(ScopeRecordsWrite)).Put("/zones/{zone}/records:batch", a.batchUpsertRecords)
+				r.With(requireScopes(ScopeRecordsWrite)).Delete("/zones/{zone}/records", a.deleteRecord)
 			})
 
 			r.Group(func(r chi.Router) {
 				r.Use(requireRole(store.RoleAdmin))
-				r.Get("/users", a.listUsers)
-				r.Post("/users", a.createUser)
-				r.Delete("/users/{id}", a.deleteUser)
+				r.With(requireScopes(ScopeUsersRead)).Get("/users", a.listUsers)
+				r.With(requireScopes(ScopeUsersWrite)).Post("/users", a.createUser)
+				r.With(requireScopes(ScopeUsersWrite)).Delete("/users/{id}", a.deleteUser)
 			})
 		})
 	})
