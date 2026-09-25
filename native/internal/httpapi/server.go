@@ -14,6 +14,7 @@ import (
 
 	"github.com/privatedns/native/internal/config"
 	"github.com/privatedns/native/internal/dashboard"
+	"github.com/privatedns/native/internal/metrics"
 	"github.com/privatedns/native/internal/store"
 )
 
@@ -43,6 +44,12 @@ func New(st *store.Store, cfg *config.Config) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	r.Get("/readyz", a.ready)
+
+	// Prometheus scrape endpoint. Unauthenticated by design — restrict at
+	// the network layer (bind API to loopback, or add firewall rule scoped
+	// to your scraper's subnet). Exposing metrics with credentials is
+	// counterproductive: scrapers don't juggle short-lived tokens well.
+	r.Handle("/metrics", metrics.Handler())
 
 	// API routes.
 	r.Route("/api/v1", func(r chi.Router) {

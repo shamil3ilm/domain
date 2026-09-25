@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/privatedns/native/internal/config"
+	"github.com/privatedns/native/internal/metrics"
 	"github.com/privatedns/native/internal/store"
 )
 
@@ -56,6 +57,9 @@ func newTestEnv(t *testing.T) *testEnv {
 		JWTSecret:  "test-secret-do-not-use-in-prod",
 		PrivateTLD: "test",
 	}
+	// Ensure the build_info gauge has at least one observation so /metrics
+	// exposes it. In production this happens in main.
+	metrics.SetBuildInfo("test")
 	h := New(st, cfg)
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
