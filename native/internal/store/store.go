@@ -588,6 +588,25 @@ func (s *Store) IsRevoked(ctx context.Context, jti string) bool {
 	return err == nil
 }
 
+// GCExpiredRevokedTokens deletes revocation rows whose expires_at has passed.
+// After a token's natural expiry there is no reason to keep it in the
+// revocation table — the JWT parser would reject it as expired regardless.
+// Returns the number of rows deleted so callers can log meaningful telemetry.
+//
+// The cutoff is passed as a Go time via placeholder rather than SQLite's
+// CURRENT_TIMESTAMP so both sides of the comparison get the driver's
+// serialization. Mixing driver time text with the SQL-side format (no
+// timezone suffix) makes the text comparison go sideways.
+func (s *Store) GCExpiredRevokedTokens(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM revoked_tokens WHERE expires_at < ?`, time.Now())
+	if err != nil {
+		return 0, fmt.Errorf("gc revoked_tokens: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // ==== helpers ============================================================
 
 func boolInt(b bool) int {
