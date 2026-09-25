@@ -130,6 +130,10 @@ Everything is environment variables. Defaults are safe.
 | `PRIVATEDNS_DNS_RATE_LIMIT_EXEMPT_CIDR` | `127.0.0.0/8,::1/128` | Sources that bypass the rate limiter               |
 | `PRIVATEDNS_LOGIN_MAX_ATTEMPTS`   | `5`                  | Failed logins before lockout per (email, IP). `0` disables. |
 | `PRIVATEDNS_LOGIN_LOCKOUT_WINDOW` | `15m`                | Sliding window for the lockout                            |
+| `PRIVATEDNS_API_TLS`              | `off`                | `off` \| `auto` (self-signed) \| `cert` (BYO)             |
+| `PRIVATEDNS_API_TLS_CERT`         |                      | Cert path (`cert` mode)                                   |
+| `PRIVATEDNS_API_TLS_KEY`          |                      | Key path (`cert` mode)                                    |
+| `PRIVATEDNS_API_TLS_HOSTS`        |                      | Comma-separated SANs for the auto-generated cert          |
 | `PRIVATEDNS_LOG_LEVEL`            | `info`               | debug / info / warn / error                               |
 
 **Security note:** never set `PRIVATEDNS_ALLOW_RECURSION_FROM` to
