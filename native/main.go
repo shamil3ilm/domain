@@ -29,6 +29,7 @@ import (
 	"github.com/privatedns/native/internal/metrics"
 	"github.com/privatedns/native/internal/store"
 	"github.com/privatedns/native/internal/svcmgr"
+	"github.com/privatedns/native/internal/tlscerts"
 )
 
 const (
@@ -167,6 +168,10 @@ Configuration via environment (all optional):
   PRIVATEDNS_DNS_RATE_LIMIT_EXEMPT_CIDR   CIDRs that bypass rate limit (default: loopback)
   PRIVATEDNS_LOGIN_MAX_ATTEMPTS      Failed logins before lockout per (email,IP) (default: 5; 0 disables)
   PRIVATEDNS_LOGIN_LOCKOUT_WINDOW    Sliding window for the lockout (default: 15m)
+  PRIVATEDNS_API_TLS                 off|auto|cert (default: off)
+  PRIVATEDNS_API_TLS_CERT            Cert path (mode=cert)
+  PRIVATEDNS_API_TLS_KEY             Key path (mode=cert)
+  PRIVATEDNS_API_TLS_HOSTS           Extra SANs for the auto-generated cert (comma-separated)
   PRIVATEDNS_LOG_LEVEL               debug|info|warn|error (default: info)
 `)
 }
@@ -258,10 +263,38 @@ func run(ctx context.Context) error {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+
+	// TLS setup. In "off" mode the API is plain HTTP. In "auto" mode we
+	// materialize a self-signed cert into DataDir/tls (fresh on first boot,
+	// reused after). "cert" uses operator-supplied paths verbatim.
+	tlsCert, tlsKey := "", ""
+	switch cfg.APITLSMode {
+	case "auto":
+		pair, fpr, err := tlscerts.EnsureSelfSigned(cfg.DataDir, cfg.APITLSHosts)
+		if err != nil {
+			return fmt.Errorf("tls auto: %w", err)
+		}
+		tlsCert, tlsKey = pair.CertPath, pair.KeyPath
+		slog.Info("tls.self_signed", "cert", pair.CertPath, "fingerprint_sha256", fpr)
+	case "cert":
+		tlsCert, tlsKey = cfg.APITLSCert, cfg.APITLSKey
+	}
+
 	httpErr := make(chan error, 1)
 	go func() {
-		slog.Info("http.listen", "addr", cfg.APIAddr, "url", displayURL(cfg.APIAddr))
-		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		scheme := "http"
+		if tlsCert != "" {
+			scheme = "https"
+		}
+		slog.Info("http.listen", "addr", cfg.APIAddr, "scheme", scheme,
+			"url", schemeURL(scheme, cfg.APIAddr))
+		var err error
+		if tlsCert != "" {
+			err = httpSrv.ListenAndServeTLS(tlsCert, tlsKey)
+		} else {
+			err = httpSrv.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("http server", "err", err)
 			httpErr <- err
 			return
@@ -316,11 +349,17 @@ func newLogHandler(cfg *config.Config) slog.Handler {
 // displayURL renders a friendly URL for a listen address like ":8080" or
 // "127.0.0.1:8080". Purely for the startup log.
 func displayURL(addr string) string {
+	return schemeURL("http", addr)
+}
+
+// schemeURL is displayURL with the scheme picked by the caller (used when
+// TLS is enabled). Same "friendliest hostname wins" logic.
+func schemeURL(scheme, addr string) string {
 	host, port, err := splitHostPort(addr)
 	if err != nil || host == "" || host == "0.0.0.0" || host == "::" {
 		host = "localhost"
 	}
-	return "http://" + host + ":" + port + "/"
+	return scheme + "://" + host + ":" + port + "/"
 }
 
 func splitHostPort(addr string) (host, port string, err error) {

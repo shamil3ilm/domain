@@ -41,6 +41,15 @@ type Config struct {
 	LoginMaxAttempts   int
 	LoginLockoutWindow time.Duration
 
+	// APITLSMode controls how the management API terminates TLS:
+	//   "off"  — plain HTTP (fine when bound to loopback).
+	//   "auto" — self-signed cert generated + persisted in DataDir/tls.
+	//   "cert" — read the cert + key from APITLSCert / APITLSKey.
+	APITLSMode  string
+	APITLSCert  string
+	APITLSKey   string
+	APITLSHosts []string
+
 	LogLevel string
 
 	// Populated by main after loading secret file.
@@ -109,6 +118,30 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	c.LoginLockoutWindow = lockoutWindow
+
+	// TLS on the management API. Default off so an operator running with
+	// the API bound to loopback (the recommended posture) doesn't have to
+	// deal with self-signed certs. Anyone binding to a real interface should
+	// flip this to "auto" or "cert".
+	c.APITLSMode = strings.ToLower(env("PRIVATEDNS_API_TLS", "off"))
+	switch c.APITLSMode {
+	case "off", "auto", "cert":
+	default:
+		return nil, fmt.Errorf("PRIVATEDNS_API_TLS: unknown mode %q (want off|auto|cert)", c.APITLSMode)
+	}
+	c.APITLSCert = os.Getenv("PRIVATEDNS_API_TLS_CERT")
+	c.APITLSKey = os.Getenv("PRIVATEDNS_API_TLS_KEY")
+	if c.APITLSMode == "cert" && (c.APITLSCert == "" || c.APITLSKey == "") {
+		return nil, fmt.Errorf("PRIVATEDNS_API_TLS=cert requires PRIVATEDNS_API_TLS_CERT and _KEY")
+	}
+	if hosts := os.Getenv("PRIVATEDNS_API_TLS_HOSTS"); hosts != "" {
+		for _, h := range strings.Split(hosts, ",") {
+			h = strings.TrimSpace(h)
+			if h != "" {
+				c.APITLSHosts = append(c.APITLSHosts, h)
+			}
+		}
+	}
 
 	// If no bootstrap password supplied, generate one — main prints it once.
 	if c.AdminPassword == "" {

@@ -27,6 +27,12 @@ import (
 	"github.com/privatedns/native/internal/dnssrv"
 	"github.com/privatedns/native/internal/httpapi"
 	"github.com/privatedns/native/internal/store"
+	"github.com/privatedns/native/internal/tlscerts"
+
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
+	"os"
 )
 
 // stack is a running privatedns instance we tear down at test end.
@@ -337,5 +343,134 @@ func TestIntegration_LoginLockout(t *testing.T) {
 		t.Error("429 missing Retry-After")
 	} else if n, err := strconv.Atoi(retry); err != nil || n < 1 {
 		t.Errorf("Retry-After should be a positive integer, got %q", retry)
+	}
+}
+
+// TestIntegration_HTTPS: same auth+CRUD flow but the API is served over
+// HTTPS using a self-signed cert generated on first boot. The client trusts
+// only that specific cert — no InsecureSkipVerify — so the test proves the
+// operator-facing SHA-256 fingerprint story really works end to end.
+func TestIntegration_HTTPS(t *testing.T) {
+	dir := t.TempDir()
+	apiPort, err := freePort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dnsPort, err := freePort()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		DataDir:            dir,
+		PrivateTLD:         "test",
+		DNSAddr:            fmt.Sprintf("127.0.0.1:%d", dnsPort),
+		APIAddr:            fmt.Sprintf("127.0.0.1:%d", apiPort),
+		AdminEmail:         "admin@integration",
+		AdminPassword:      "integration-tls-pw-12345",
+		AllowRecursionFrom: []string{"127.0.0.0/8"},
+		DNSRateLimitPerSec: 1000,
+		DNSRateLimitBurst:  1000,
+		DNSRateLimitExempt: []string{"127.0.0.0/8"},
+		LoginMaxAttempts:   5,
+		LoginLockoutWindow: 15 * time.Minute,
+		JWTSecret:          "integration-secret-tls",
+		APITLSMode:         "auto",
+		APITLSHosts:        []string{"127.0.0.1", "localhost"},
+	}
+
+	st, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := bootstrap.Run(context.Background(), st, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	pair, _, err := tlscerts.EnsureSelfSigned(cfg.DataDir, cfg.APITLSHosts)
+	if err != nil {
+		t.Fatalf("gen self-signed: %v", err)
+	}
+
+	// Start the DNS side so bootStack invariants (shutdown wiring, etc.) hold.
+	dnsSrv := dnssrv.New(st, cfg)
+	dnsCtx, dnsCancel := context.WithCancel(context.Background())
+	go func() { _ = dnsSrv.Start(dnsCtx) }()
+	t.Cleanup(func() {
+		dnsCancel()
+		dnsSrv.Shutdown()
+	})
+
+	httpSrv := &http.Server{
+		Addr:              cfg.APIAddr,
+		Handler:           httpapi.New(st, cfg),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() { _ = httpSrv.ListenAndServeTLS(pair.CertPath, pair.KeyPath) }()
+	t.Cleanup(func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(shutCtx)
+	})
+	if err := waitTCP(cfg.APIAddr, 5*time.Second); err != nil {
+		t.Fatalf("api never came up: %v", err)
+	}
+
+	// Build a client that trusts only the server's own cert. NO
+	// InsecureSkipVerify — verification must succeed against the pool.
+	certBytes, err := os.ReadFile(pair.CertPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(certBytes)
+	if block == nil {
+		t.Fatal("no PEM block in server cert")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(cert)
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: pool},
+		},
+	}
+
+	apiURL := "https://" + cfg.APIAddr
+
+	// Log in over HTTPS.
+	body, _ := json.Marshal(map[string]string{
+		"email":    cfg.AdminEmail,
+		"password": cfg.AdminPassword,
+	})
+	resp, err := client.Post(apiURL+"/api/v1/auth/login", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("login over HTTPS: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("login: status=%d", resp.StatusCode)
+	}
+	var lr struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&lr); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// Any authed endpoint proves the full HTTPS stack works.
+	req, _ := http.NewRequest(http.MethodGet, apiURL+"/api/v1/zones", nil)
+	req.Header.Set("Authorization", "Bearer "+lr.Token)
+	resp2, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("list zones over HTTPS: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != 200 {
+		t.Fatalf("list zones: status=%d", resp2.StatusCode)
 	}
 }
