@@ -32,7 +32,7 @@ import (
 )
 
 const (
-	version     = "0.2.0"
+	version     = "0.3.0"
 	serviceName = "privatedns"
 	displayName = "privatedns"
 	description = "Private DNS + management API"
