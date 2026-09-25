@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -33,6 +34,12 @@ type Config struct {
 	DNSRateLimitPerSec float64
 	DNSRateLimitBurst  int
 	DNSRateLimitExempt []string
+
+	// Login lockout: N failed attempts in a rolling window per (email, ip)
+	// short-circuits the login handler with 429 + Retry-After. Setting max
+	// to 0 disables the lockout entirely.
+	LoginMaxAttempts   int
+	LoginLockoutWindow time.Duration
 
 	LogLevel string
 
@@ -90,6 +97,18 @@ func Load() (*Config, error) {
 	} else {
 		c.DNSRateLimitExempt = []string{"127.0.0.0/8", "::1/128"}
 	}
+
+	// Login lockout. Defaults: 5 failures per 15 minutes per (email, IP).
+	maxAttempts, err := parseIntDefault("PRIVATEDNS_LOGIN_MAX_ATTEMPTS", 5)
+	if err != nil {
+		return nil, err
+	}
+	c.LoginMaxAttempts = maxAttempts
+	lockoutWindow, err := parseDurationDefault("PRIVATEDNS_LOGIN_LOCKOUT_WINDOW", 15*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	c.LoginLockoutWindow = lockoutWindow
 
 	// If no bootstrap password supplied, generate one — main prints it once.
 	if c.AdminPassword == "" {
@@ -153,4 +172,16 @@ func parseIntDefault(key string, def int) (int, error) {
 		return 0, fmt.Errorf("%s: invalid int %q: %w", key, v, err)
 	}
 	return n, nil
+}
+
+func parseDurationDefault(key string, def time.Duration) (time.Duration, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s: invalid duration %q: %w", key, v, err)
+	}
+	return d, nil
 }
