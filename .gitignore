@@ -30,3 +30,6 @@ native/dist/
 *.swo
 .DS_Store
 Thumbs.db
+
+# Local Claude Code / editor runtime state — never check this in.
+.claude/
