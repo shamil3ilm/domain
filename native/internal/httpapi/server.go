@@ -19,17 +19,19 @@ import (
 )
 
 type apiServer struct {
-	store *store.Store
-	cfg   *config.Config
-	jwt   *jwtIssuer
+	store    *store.Store
+	cfg      *config.Config
+	jwt      *jwtIssuer
+	loginLim *loginLimiter
 }
 
 // New wires the router and returns an http.Handler.
 func New(st *store.Store, cfg *config.Config) http.Handler {
 	a := &apiServer{
-		store: st,
-		cfg:   cfg,
-		jwt:   newJWT(cfg.JWTSecret),
+		store:    st,
+		cfg:      cfg,
+		jwt:      newJWT(cfg.JWTSecret),
+		loginLim: newLoginLimiter(cfg.LoginMaxAttempts, cfg.LoginLockoutWindow),
 	}
 
 	r := chi.NewRouter()

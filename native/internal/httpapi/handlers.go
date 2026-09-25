@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,16 +36,39 @@ func (a *apiServer) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "email and password required")
 		return
 	}
+
+	ip := clientIPFrom(r.Context())
+
+	// Lockout check runs BEFORE the bcrypt verify below. Otherwise a locked
+	// -out attacker still consumes bcrypt work on every guess and can time
+	// its cost.
+	if allowed, retry := a.loginLim.allow(req.Email, ip); !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())))
+		a.store.WriteAudit(r.Context(), store.AuditEvent{
+			ActorIP: ip,
+			Action:  "user.login", Outcome: "denied",
+			Detail: "locked_out email=" + req.Email,
+		})
+		writeError(w, http.StatusTooManyRequests, "too many failed attempts, try again later")
+		return
+	}
+
 	u, err := a.store.GetUserByEmail(r.Context(), req.Email)
 	if err != nil || u.Disabled || !verifyPassword(u.PasswordHash, req.Password) {
+		a.loginLim.recordFailure(req.Email, ip)
 		a.store.WriteAudit(r.Context(), store.AuditEvent{
-			ActorIP: clientIPFrom(r.Context()),
+			ActorIP: ip,
 			Action:  "user.login", Outcome: "failure",
 			Detail: "email=" + req.Email,
 		})
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
+
+	// Clear on success so a typo followed by the correct password doesn't
+	// leave the account cool-down half-full.
+	a.loginLim.clear(req.Email, ip)
+
 	tok, err := a.jwt.sign(u)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "sign token")
@@ -52,7 +76,7 @@ func (a *apiServer) login(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = a.store.TouchLogin(r.Context(), u.ID)
 	a.store.WriteAudit(r.Context(), store.AuditEvent{
-		ActorUser: u.ID, ActorIP: clientIPFrom(r.Context()),
+		ActorUser: u.ID, ActorIP: ip,
 		Action: "user.login", Outcome: "success",
 	})
 	u.PasswordHash = ""
