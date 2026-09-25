@@ -172,6 +172,7 @@ Configuration via environment (all optional):
   PRIVATEDNS_API_TLS_CERT            Cert path (mode=cert)
   PRIVATEDNS_API_TLS_KEY             Key path (mode=cert)
   PRIVATEDNS_API_TLS_HOSTS           Extra SANs for the auto-generated cert (comma-separated)
+  PRIVATEDNS_AXFR_ALLOW_FROM         CIDRs allowed to AXFR zones (default: none — transfers disabled)
   PRIVATEDNS_LOG_LEVEL               debug|info|warn|error (default: info)
 `)
 }

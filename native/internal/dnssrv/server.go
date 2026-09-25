@@ -26,6 +26,7 @@ type Server struct {
 	tcpSrv       *dns.Server
 	allowQuery   []*net.IPNet // empty = allow all
 	allowRecurse []*net.IPNet // empty = deny all
+	allowAXFR    []*net.IPNet // empty = deny all
 	upstream     *forwarder
 	limiter      *RateLimiter
 }
@@ -36,6 +37,7 @@ func New(st *store.Store, cfg *config.Config) *Server {
 		cfg:          cfg,
 		allowQuery:   parseCIDRs(cfg.AllowQueryFrom),
 		allowRecurse: parseCIDRs(cfg.AllowRecursionFrom),
+		allowAXFR:    parseCIDRs(cfg.AXFRAllowFrom),
 		upstream:     newForwarder(cfg.Upstreams),
 		limiter: NewRateLimiter(RateLimiterConfig{
 			PerSecond:   cfg.DNSRateLimitPerSec,
@@ -131,6 +133,15 @@ func (s *Server) handle(w dns.ResponseWriter, r *dns.Msg) {
 	}()
 
 	remoteIP := ipOf(mw.RemoteAddr())
+
+	// AXFR is a control-plane operation with its own ACL and its own
+	// TCP-only transport. Handle it before the query ACL / rate limit so
+	// operators can grant transfer without granting general query rights.
+	if len(r.Question) > 0 && r.Question[0].Qtype == dns.TypeAXFR {
+		s.handleAXFR(mw, r)
+		return
+	}
+
 	if !inACL(remoteIP, s.allowQuery, true /* empty = allow */) {
 		metrics.DNSACLRefusals.WithLabelValues("query").Inc()
 		m := new(dns.Msg)
