@@ -208,6 +208,34 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 
+	// Periodic housekeeping: drop expired JWT revocation rows so the table
+	// doesn't grow forever. Once a token's natural expiry has passed the
+	// parser rejects it anyway; the revocation row is just noise. Runs
+	// hourly, plus once at boot so a long-idle process cleans up on start.
+	go func() {
+		gc := func() {
+			n, err := st.GCExpiredRevokedTokens(ctx)
+			if err != nil {
+				slog.Warn("revoked_tokens.gc", "err", err)
+				return
+			}
+			if n > 0 {
+				slog.Info("revoked_tokens.gc", "removed", n)
+			}
+		}
+		gc() // first pass at boot
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				gc()
+			}
+		}
+	}()
+
 	// Start DNS server.
 	dnsServer := dnssrv.New(st, cfg)
 	dnsErr := make(chan error, 1)
